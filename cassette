@@ -176,6 +176,9 @@ switch ($command) {
             } else {
                 echo "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n";
                 echo "  Diff files: .cassette/runs/$name/http/*.diff\n";
+            }
+            exit($allPassed ? 0 : 1);
+        }
 
         echo "\n\033[1m── Screenshot replay ───────────────────────────────────\033[0m\n";
 
