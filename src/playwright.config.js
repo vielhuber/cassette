@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { defineConfig } = require('@playwright/test');
 
-const configPath = path.join(__dirname, '../../../../.cassette/config.json');
+const projectRoot = process.env.CASSETTE_ROOT || path.join(__dirname, '../../../..');
+const configPath = path.join(projectRoot, '.cassette/config.json');
 const cassetteConfig = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
 
 module.exports = defineConfig({
@@ -13,7 +14,7 @@ module.exports = defineConfig({
     testMatch: 'cassette.spec.js',
 
     // Screenshots live in .data/{cassette-name}/screenshots/ alongside all other run data.
-    snapshotDir: path.join(__dirname, '../../../../.cassette/runs', process.env.CASSETTE_NAME || '_unknown', 'screenshots'),
+    snapshotDir: path.join(projectRoot, '.cassette/runs', process.env.CASSETTE_NAME || '_unknown', 'screenshots'),
     snapshotPathTemplate: '{snapshotDir}/{arg}{ext}',
 
     // Sequential execution is required: requests must be replayed in the exact

@@ -230,7 +230,7 @@ switch ($command) {
         $updateFlag   = $hasBaselines ? '' : ' --update-snapshots';
 
         $configFile = escapeshellarg(__DIR__ . '/src/playwright.config.js');
-        $env        = 'CASSETTE_NAME=' . escapeshellarg($name);
+        $env        = 'CASSETTE_ROOT=' . escapeshellarg($projectRoot) . ' CASSETTE_NAME=' . escapeshellarg($name);
         if ($baseUrl !== null) {
             $env .= ' CASSETTE_BASE_URL=' . escapeshellarg($baseUrl);
         }
