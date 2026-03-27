@@ -13,7 +13,7 @@ module.exports = defineConfig({
     testDir: __dirname,
     testMatch: 'cassette.spec.js',
 
-    // Screenshots live in .data/{cassette-name}/screenshots/ alongside all other run data.
+    // Screenshots live in .cassette/runs/{cassette-name}/screenshots/ alongside all other run data.
     snapshotDir: path.join(projectRoot, '.cassette/runs', process.env.CASSETTE_NAME || '_unknown', 'screenshots'),
     snapshotPathTemplate: '{snapshotDir}/{arg}{ext}',
 
@@ -29,7 +29,7 @@ module.exports = defineConfig({
         ? cassetteConfig.screenshot.timeout * 200 // headroom for up to 200 steps
         : 5 * 60 * 1000, // default: 5 min
 
-    // Artifacts (traces etc.) land in /tmp — diffs are copied to .data/{name}/
+    // Artifacts (traces etc.) land in /tmp — diffs are copied to .cassette/runs/{name}/
     // directly by the afterEach hook in cassette.spec.js.
     outputDir: '/tmp/cassette-playwright-results',
 

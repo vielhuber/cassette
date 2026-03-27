@@ -57,12 +57,8 @@ $cassettesDir = $projectRoot . '/.cassette/runs';
 
 // Ensure the data directory exists before reading state.
 if (!is_dir($cassettesDir)) {
+    // recursive: true also creates the .cassette parent if it does not yet exist.
     mkdir($cassettesDir, 0775, true);
-}
-
-// Ensure the .cassette root exists too (state.json lives there).
-if (!is_dir(dirname($cassettesDir))) {
-    mkdir(dirname($cassettesDir), 0775, true);
 }
 
 // Auto-create .cassette/config.json from the bundled example if not yet present.
@@ -179,10 +175,7 @@ switch ($command) {
                 echo "\033[32m✅ All checks passed\033[0m\n";
             } else {
                 echo "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n";
-                echo "  Diff files: .cassette/$name/http/*.diff\n";
-            }
-            exit($allPassed ? 0 : 1);
-        }
+                echo "  Diff files: .cassette/runs/$name/http/*.diff\n";
 
         echo "\n\033[1m── Screenshot replay ───────────────────────────────────\033[0m\n";
 
@@ -251,7 +244,7 @@ switch ($command) {
             if ($screenshotExitCode !== 0)  { echo " [Screenshots]"; }
             echo "\n";
             if ($httpExitCode !== 0) {
-                echo "  Diff files: .cassette/$name/http/*.diff\n";
+                echo "  Diff files: .cassette/runs/$name/http/*.diff\n";
             }
         }
 

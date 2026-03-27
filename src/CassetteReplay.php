@@ -142,7 +142,7 @@ foreach ($log as $index => $entry) {
         $diffLines = array_merge($diffLines, $diff);
     }
 
-    // Write the full diff to .data/{name}/http/{step}.diff and show path.
+    // Write the full diff to .cassette/runs/{name}/http/{step}.diff and show path.
     if (!empty($diffLines)) {
         if (!is_dir($diffDir)) {
             mkdir($diffDir, 0775, true);

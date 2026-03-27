@@ -43,7 +43,7 @@ test.beforeAll(() => {
     fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: 0 }));
 });
 
-// After each test, copy actual/diff PNGs directly into .data/{name}/screenshots/
+// After each test, copy actual/diff PNGs directly into .cassette/runs/{name}/screenshots/
 // so they are visible next to the baselines.
 test.afterEach(async ({}, testInfo) => {
     if (testInfo.status === 'passed') {
