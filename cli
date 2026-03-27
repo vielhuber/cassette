@@ -40,11 +40,16 @@ if ($command === '' || ($nameRequired && $name === '')) {
 //   vendor/vielhuber/cassette  →  vendor/vielhuber  →  vendor  →  project root
 $projectRoot  = dirname(__DIR__, 3);
 $configPath   = $projectRoot . '/.cassette/state.json';
-$cassettesDir = $projectRoot . '/.cassette';
+$cassettesDir = $projectRoot . '/.cassette/runs';
 
 // Ensure the data directory exists before reading state.
 if (!is_dir($cassettesDir)) {
     mkdir($cassettesDir, 0775, true);
+}
+
+// Ensure the .cassette root exists too (state.json lives there).
+if (!is_dir(dirname($cassettesDir))) {
+    mkdir(dirname($cassettesDir), 0775, true);
 }
 
 $config = file_exists($configPath)

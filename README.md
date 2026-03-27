@@ -5,7 +5,7 @@ cassette hooks into your PHP application at the lowest level — intercepting da
 ## Installation
 
 ```bash
-composer require vielhuber/cassette
+composer require --dev vielhuber/cassette
 ```
 
 **Requirements:**
@@ -42,7 +42,7 @@ cp vendor/vielhuber/cassette/config.example.json .cassette/config.json
 
 Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
-All run data is stored in `.cassette/<name>/`. Screenshot baselines are stored in `.cassette/<name>/screenshots/` and should be committed to git.
+All run data is stored in `.cassette/runs/<name>/`. Screenshot baselines are stored in `.cassette/runs/<name>/screenshots/` and should be committed to git.
 
 Add `.cassette/state.json` to `.gitignore` to avoid committing the active mode flag.
 

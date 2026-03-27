@@ -13,7 +13,7 @@ module.exports = defineConfig({
     testMatch: 'cassette.spec.js',
 
     // Screenshots live in .data/{cassette-name}/screenshots/ alongside all other run data.
-    snapshotDir: path.join(__dirname, '../../../../.cassette', process.env.CASSETTE_NAME || '_unknown', 'screenshots'),
+    snapshotDir: path.join(__dirname, '../../../../.cassette/runs', process.env.CASSETTE_NAME || '_unknown', 'screenshots'),
     snapshotPathTemplate: '{snapshotDir}/{arg}{ext}',
 
     // Sequential execution is required: requests must be replayed in the exact

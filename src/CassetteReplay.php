@@ -37,7 +37,7 @@ $cassetteName = $argv[1] ?? 'run_001';
 $baseUrlOverride = isset($argv[2]) ? rtrim($argv[2], '/') : null;
 
 // Four levels up from vendor/vielhuber/cassette/src/ = project root.
-$cassettesDir = dirname(__DIR__, 4) . '/.cassette';
+$cassettesDir = dirname(__DIR__, 4) . '/.cassette/runs';
 $httpLogPath = $cassettesDir . '/' . $cassetteName . '/http.json';
 $pointerPath = $cassettesDir . '/' . $cassetteName . '/data.pointer';
 

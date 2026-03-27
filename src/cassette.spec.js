@@ -15,7 +15,7 @@ if (!cassetteName) {
     throw new Error('CASSETTE_NAME environment variable is required.');
 }
 
-const dataDir = path.join(__dirname, '../../../../.cassette');
+const dataDir = path.join(__dirname, '../../../../.cassette/runs');
 const runDir = path.join(dataDir, cassetteName);
 const httpLogPath = path.join(runDir, 'http.json');
 const pointerPath = path.join(runDir, 'data.pointer');

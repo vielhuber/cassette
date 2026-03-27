@@ -87,7 +87,7 @@ if ($cassetteMode === '' || $cassetteName === '') {
 
 require_once __DIR__ . '/Cassette.php';
 
-Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette');
+Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette/runs');
 
 // Install all uopz hooks (hooks read Cassette::getMode() at call time).
 require_once __DIR__ . '/CassetteHooks.php';
@@ -96,7 +96,7 @@ require_once __DIR__ . '/CassetteHooks.php';
 // can compare actual responses against recorded ones later.
 require_once __DIR__ . '/CassetteHttpRecorder.php';
 
-CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette');
+CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette/runs');
 
 // Auto-save the tape when the PHP process exits (record mode only).
 // Persist the replay pointer after each mock request so the next request
