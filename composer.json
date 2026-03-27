@@ -8,6 +8,6 @@
     "suggest": {
         "vielhuber/stringhelper": "Required to intercept __::curl() calls during record/replay."
     },
-    "bin": ["cli"],
+    "bin": ["cassette"],
     "license": "MIT"
 }
