@@ -36,9 +36,22 @@ if ($command === '' || ($nameRequired && $name === '')) {
     exit(1);
 }
 
-// When installed via Composer the project root is three levels above the package dir:
-//   vendor/vielhuber/cassette  →  vendor/vielhuber  →  vendor  →  project root
-$projectRoot  = dirname(__DIR__, 3);
+// Locate project root without resolving symlinks so that path-repository installs work.
+// vendor/bin/<script> is always two directory levels below the project root.
+$__rawInvocation = $argv[0];
+if (!str_starts_with($__rawInvocation, '/')) {
+    $__rawInvocation = (getcwd() ?: '.') . '/' . $__rawInvocation;
+}
+$__parts = explode('/', $__rawInvocation);
+$__segments = [];
+foreach ($__parts as $__part) {
+    if ($__part === '' || $__part === '.') { continue; }
+    if ($__part === '..') { array_pop($__segments); continue; }
+    $__segments[] = $__part;
+}
+// vendor/bin/<script> — remove last 3 path segments to reach project root.
+$projectRoot = '/' . implode('/', array_slice($__segments, 0, -3));
+unset($__rawInvocation, $__parts, $__segments, $__part);
 $configPath   = $projectRoot . '/.cassette/state.json';
 $cassettesDir = $projectRoot . '/.cassette/runs';
 
@@ -145,7 +158,7 @@ switch ($command) {
             echo "\033[1m── HTTP replay ─────────────────────────────────────────\033[0m\n";
             $replayScript = __DIR__ . '/src/CassetteReplay.php';
             $replayArgs   = escapeshellarg($name) . ($baseUrl !== null ? ' ' . escapeshellarg($baseUrl) : '');
-            passthru("php $replayScript $replayArgs", $httpExitCode);
+            passthru('CASSETTE_ROOT=' . escapeshellarg($projectRoot) . " php $replayScript $replayArgs", $httpExitCode);
 
             if ($httpExitCode !== 0) {
                 $remaining   = interactiveAcceptDiffs(

@@ -46,11 +46,34 @@ declare(strict_types=1);
 $cassetteMode = (string) ($_SERVER['CASSETTE_MODE'] ?? (getenv('CASSETTE_MODE') ?? ''));
 $cassetteName = (string) ($_SERVER['CASSETTE_NAME'] ?? (getenv('CASSETTE_NAME') ?? ''));
 
+// Locate project root: works for both regular Composer install and path-repository symlinks.
+// Normal: vendor/vielhuber/cassette/src → 4 levels up = project root.
+// Path-repo: __DIR__ resolves to the actual source location (outside vendor/), so we walk up
+// SCRIPT_FILENAME to find the nearest ancestor directory that contains a vendor/ folder.
+$cassetteSiteRoot = (static function (): string {
+    $envRoot = (string) ($_SERVER['CASSETTE_ROOT'] ?? (getenv('CASSETTE_ROOT') ?: ''));
+    if ($envRoot !== '') {
+        return rtrim($envRoot, '/');
+    }
+    if (str_ends_with(str_replace(DIRECTORY_SEPARATOR, '/', __DIR__), 'vendor/vielhuber/cassette/src')) {
+        return dirname(__DIR__, 4);
+    }
+    $script = realpath($_SERVER['SCRIPT_FILENAME'] ?? '') ?: '';
+    if ($script !== '') {
+        $dir = dirname($script);
+        while ($dir !== '/' && $dir !== '') {
+            if (is_dir($dir . '/vendor')) {
+                return $dir;
+            }
+            $dir = dirname($dir);
+        }
+    }
+    return dirname(__DIR__, 4);
+})();
+
 // Priority 2: control file (web requests, WordPress).
 if ($cassetteMode === '' || $cassetteName === '') {
-    // When installed via Composer the project root is four levels above src/:
-    //   vendor/vielhuber/cassette/src  →  vendor/vielhuber/cassette  →  vendor/vielhuber  →  vendor  →  project root
-    $controlFile = dirname(__DIR__, 4) . '/.cassette/state.json';
+    $controlFile = $cassetteSiteRoot . '/.cassette/state.json';
 
     if (is_file($controlFile)) {
         $control = json_decode((string) file_get_contents($controlFile), true);
@@ -67,9 +90,8 @@ if ($cassetteMode === '' || $cassetteName === '') {
 // Auto-discover Composer autoloaders so uopz can hook classes like __::curl.
 // Searches vendor/autoload.php in the site root and all theme/plugin directories.
 // Uses require_once, so including multiple loaders is always safe.
-(static function (): void {
-    // Four levels up from vendor/vielhuber/cassette/src/ = project root.
-    $siteRoot = dirname(__DIR__, 4);
+(static function () use ($cassetteSiteRoot): void {
+    $siteRoot = $cassetteSiteRoot;
 
     $patterns = [
         $siteRoot . '/vendor/autoload.php',
@@ -87,7 +109,7 @@ if ($cassetteMode === '' || $cassetteName === '') {
 
 require_once __DIR__ . '/Cassette.php';
 
-Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette/runs');
+Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: $cassetteSiteRoot . '/.cassette/runs');
 
 // Install all uopz hooks (hooks read Cassette::getMode() at call time).
 require_once __DIR__ . '/CassetteHooks.php';
@@ -96,7 +118,7 @@ require_once __DIR__ . '/CassetteHooks.php';
 // can compare actual responses against recorded ones later.
 require_once __DIR__ . '/CassetteHttpRecorder.php';
 
-CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette/runs');
+CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: $cassetteSiteRoot . '/.cassette/runs');
 
 // Auto-save the tape when the PHP process exits (record mode only).
 // Persist the replay pointer after each mock request so the next request

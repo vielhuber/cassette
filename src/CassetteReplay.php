@@ -36,8 +36,11 @@ if (function_exists('uopz_allow_exit')) {
 $cassetteName = $argv[1] ?? 'run_001';
 $baseUrlOverride = isset($argv[2]) ? rtrim($argv[2], '/') : null;
 
-// Four levels up from vendor/vielhuber/cassette/src/ = project root.
-$cassettesDir = dirname(__DIR__, 4) . '/.cassette/runs';
+// Honour CASSETTE_ROOT env var (set by the CLI binary) so path-repository symlink installs
+// work correctly. Falls back to the standard Composer layout.
+$__cassetteRoot = (string) (getenv('CASSETTE_ROOT') ?: '');
+$cassettesDir = ($__cassetteRoot !== '' ? rtrim($__cassetteRoot, '/') : dirname(__DIR__, 4)) . '/.cassette/runs';
+unset($__cassetteRoot);
 $httpLogPath = $cassettesDir . '/' . $cassetteName . '/http.json';
 $pointerPath = $cassettesDir . '/' . $cassetteName . '/data.pointer';
 
