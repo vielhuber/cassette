@@ -105,11 +105,8 @@ switch ($command) {
             exit(1);
         }
 
-        // Deactivate recording — mode is set to 'stopped' so bootstrap.php becomes a no-op.
-        // The name is preserved so replay knows which cassette to use.
-        $config['mode'] = 'stopped';
-
-        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        // Deactivate recording — state.json is deleted so bootstrap.php becomes a no-op.
+        clearState($configPath);
 
         echo "\033[32m✅ Recording stopped\033[0m  cassette: \033[1m$name\033[0m\n";
         echo "\n  Run when ready:\n";
@@ -117,6 +114,12 @@ switch ($command) {
         break;
 
     case 'replay':
+        if (!file_exists($cassettesDir . '/' . $name . '/http.json')) {
+            fwrite(STDERR, "Run not found: $name\n");
+            fwrite(STDERR, "Record it first: vendor/bin/cassette record $name\n");
+            exit(1);
+        }
+
         $refresh        = in_array('--refresh', $argv, true);
         $httpOnly       = in_array('--http-only', $argv, true);
         $screenshotOnly = in_array('--screenshot-only', $argv, true);
@@ -170,8 +173,7 @@ switch ($command) {
 
         if ($httpOnly) {
             $allPassed = ($httpExitCode === 0);
-            $config['mode'] = 'stopped';
-            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+            clearState($configPath);
             echo "\n" . str_repeat('─', 56) . "\n";
             if ($allPassed) {
                 echo "\033[32m✅ All checks passed\033[0m\n";
@@ -239,8 +241,7 @@ switch ($command) {
         );
 
         $allPassed = ($httpExitCode === 0 && $screenshotExitCode === 0);
-        $config['mode'] = 'stopped';
-        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        clearState($configPath);
         echo "\n" . str_repeat('─', 56) . "\n";
 
         if ($allPassed) {
@@ -304,9 +305,7 @@ switch ($command) {
                 deleteDir($cassettesDir . '/' . $run);
             }
 
-            $config['mode'] = 'stopped';
-            $config['name'] = '';
-            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+            clearState($configPath);
 
             echo "\033[32m✅ Deleted " . count($runs) . " run(s).\033[0m\n";
             break;
@@ -333,9 +332,7 @@ switch ($command) {
 
         // Clear config if it referenced this run.
         if (($config['name'] ?? '') === $name) {
-            $config['mode'] = 'stopped';
-            $config['name'] = '';
-            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+            clearState($configPath);
         }
 
         echo "\033[32m✅ Deleted run:\033[0m $name\n";
@@ -383,6 +380,16 @@ switch ($command) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Delete the state file — absence of state.json means 'stopped'.
+ */
+function clearState(string $configPath): void
+{
+    if (file_exists($configPath)) {
+        unlink($configPath);
+    }
+}
 
 /**
  * Show each .diff file interactively and let the user accept or skip.
