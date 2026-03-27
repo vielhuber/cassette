@@ -62,6 +62,13 @@ foreach ($__parts as $__part) {
 // vendor/bin/<script> — remove last 3 path segments to reach project root.
 $projectRoot = $projectRootOverride ?? ('/' . implode('/', array_slice($__segments, 0, -3)));
 unset($__rawInvocation, $__parts, $__segments, $__part);
+
+if (!is_dir($projectRoot)) {
+    fwrite(STDERR, "Error: project root does not exist: $projectRoot\n");
+    fwrite(STDERR, "Use --root=/path/to/your/project to specify the correct path.\n");
+    exit(1);
+}
+
 $configPath   = $projectRoot . '/.cassette/state.json';
 $cassettesDir = $projectRoot . '/.cassette/runs';
 
