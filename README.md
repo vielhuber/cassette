@@ -1,42 +1,50 @@
-# \_cassette
+# 📼 cassette 📼
 
-Record real HTTP flows once, replay them deterministically as regression tests.
+cassette hooks into your PHP application at the lowest level — intercepting database calls and outgoing HTTP requests via [uopz](https://www.php.net/manual/en/book.uopz.php) and serialises every return value to a JSON tape. On replay, the server runs normally but all external I/O is served from that tape, making each test completely self-contained: no database, no network, no side effects. Visual regression is layered on top via Playwright, which navigates through the recorded request sequence and compares screenshots against committed baselines.
 
 ## Installation
 
-Add to `wp-config.php` before the "stop editing" comment:
+```bash
+composer require vielhuber/cassette
+```
+
+**Requirements:**
+
+- PHP ≥ 8.3 with the [uopz](https://www.php.net/manual/en/book.uopz.php) extension
+- Node.js (for visual screenshot regression — installed automatically on first use)
+
+**Bootstrap** — add one line to your entry point (e.g. `wp-config.php`) before any application code runs:
 
 ```php
-require_once __DIR__ . '/_cassette/src/bootstrap.php';
+require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
 ```
 
-Install Playwright once (only required for visual regression tests):
+The bootstrap is a no-op when no cassette is active, so it is always safe to keep this line in place.
+
+**Optional config** — copy the example and adjust screenshot settings:
 
 ```bash
-cd _cassette && npm install && npx playwright install chromium
-```
-
-Copy the example config and adjust as needed:
-
-```bash
-cp _cassette/config.example.json _cassette/config.json
+mkdir -p .cassette
+cp vendor/vielhuber/cassette/config.example.json .cassette/config.json
 ```
 
 ## Usage
 
-| Command                                                                                           | Description                                                                           |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `php _cassette/cli record <name>`                                                                 | Switch to record mode and clear old data — then click through the flow in the browser |
-| `php _cassette/cli stop <name>`                                                                   | Stop recording — further requests are no longer captured                              |
-| `php _cassette/cli replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]` | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
-| `php _cassette/cli accept <name>`                                                                 | Interactively accept HTTP diffs as new baseline                                       |
-| `php _cassette/cli delete <name>`                                                                 | Delete a run including all its data and screenshots                                   |
-| `php _cassette/cli delete --all`                                                                  | Delete all runs                                                                       |
-| `php _cassette/cli list`                                                                          | List all recorded runs with request count and screenshots                             |
+| Command                                                                                                   | Description                                                                           |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `vendor/bin/cassette record <name>`                                                                       | Switch to record mode and clear old data — then click through the flow in the browser |
+| `vendor/bin/cassette stop <name>`                                                                         | Stop recording — further requests are no longer captured                              |
+| `vendor/bin/cassette replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]`      | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
+| `vendor/bin/cassette accept <name>`                                                                       | Interactively accept HTTP diffs as new baseline                                       |
+| `vendor/bin/cassette delete <name>`                                                                       | Delete a run including all its data and screenshots                                   |
+| `vendor/bin/cassette delete --all`                                                                        | Delete all runs                                                                       |
+| `vendor/bin/cassette list`                                                                                | List all recorded runs with request count and screenshots                             |
 
 Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
-Screenshot baselines are stored in `.data/<name>/screenshots/` and should be committed to git.
+All run data is stored in `.cassette/<name>/`. Screenshot baselines are stored in `.cassette/<name>/screenshots/` and should be committed to git.
+
+Add `.cassette/state.json` to `.gitignore` to avoid committing the active mode flag.
 
 ## Portability
 
@@ -45,7 +53,7 @@ replayed anywhere — CI, localhost, staging — without re-recording:
 
 ```bash
 # Replay against a different host than the one used during recording
-php _cassette/cli replay run_001 --base-url=http://localhost
+vendor/bin/cassette replay run_001 --base-url=http://localhost
 ```
 
 The `--base-url` flag replaces the host for both the HTTP diff and the Playwright
@@ -55,7 +63,7 @@ For GitHub Actions, pass the URL as a secret:
 
 ```yaml
 - name: Replay cassettes
-  run: php _cassette/cli replay run_001 --base-url=${{ secrets.APP_URL }}
+  run: vendor/bin/cassette replay run_001 --base-url=${{ secrets.APP_URL }}
 ```
 
 ### No database required for replay
@@ -71,9 +79,19 @@ cassette data. The server must be running and reachable, but:
 This makes cassette replays safe to run on CI, on a fresh machine, or against a
 server whose database is empty, stale, or even offline.
 
+### curl interception
+
+To intercept `__::curl()` calls, add [`vielhuber/stringhelper`](https://github.com/vielhuber/stringhelper) to your project:
+
+```bash
+composer require vielhuber/stringhelper
+```
+
+Without it, cassette still records and replays all database calls — curl interception is simply skipped.
+
 ## Configuration
 
-Create `_cassette/config.json` to customise screenshot behaviour per project:
+Create `.cassette/config.json` to customise screenshot behaviour per project:
 
 ```json
 {

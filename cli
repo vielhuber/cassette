@@ -6,13 +6,12 @@ declare(strict_types=1);
  * Cassette CLI helper.
  *
  * Usage:
- *   php _cassette/cli record     <name>   — switch to record mode and clear old cassette
- *   php _cassette/cli replay     <name>   — switch to mock mode and run the replay suite
- *   php _cassette/cli accept     <name>   — interactively accept HTTP diffs as new baseline
- *   php _cassette/cli screenshot <name>   — visual regression via Playwright
- *   php _cassette/cli stop       <name>   — stop recording, keep data for later replay
- *   php _cassette/cli delete     <name>   — delete a run and all its data
- *   php _cassette/cli list               — list all recorded runs
+ *   vendor/bin/cassette record     <name>   — switch to record mode and clear old cassette
+ *   vendor/bin/cassette replay     <name>   — switch to mock mode and run the replay suite
+ *   vendor/bin/cassette accept     <name>   — interactively accept HTTP diffs as new baseline
+ *   vendor/bin/cassette stop       <name>   — stop recording, keep data for later replay
+ *   vendor/bin/cassette delete     <name>   — delete a run and all its data
+ *   vendor/bin/cassette list               — list all recorded runs
  */
 
 // Allow exit()/die() to actually terminate the process even when the uopz extension
@@ -28,19 +27,29 @@ $nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delet
 
 if ($command === '' || ($nameRequired && $name === '')) {
     echo "Usage:\n";
-    echo "  php _cassette/cli record  <name>            — record a new flow\n";
-    echo "  php _cassette/cli replay  <name> [--refresh] — HTTP diff + visual screenshot regression\n";
-    echo "  php _cassette/cli accept  <name>            — interactively accept HTTP diffs as new baseline\n";
-    echo "  php _cassette/cli stop    <name>            — stop recording, keep data for later replay\n";
-    echo "  php _cassette/cli delete  <name>            — delete a run and all its data\n";
-    echo "  php _cassette/cli list                      — list all recorded runs\n";
+    echo "  vendor/bin/cassette record  <name>            — record a new flow\n";
+    echo "  vendor/bin/cassette replay  <name> [--refresh] — HTTP diff + visual screenshot regression\n";
+    echo "  vendor/bin/cassette accept  <name>            — interactively accept HTTP diffs as new baseline\n";
+    echo "  vendor/bin/cassette stop    <name>            — stop recording, keep data for later replay\n";
+    echo "  vendor/bin/cassette delete  <name>            — delete a run and all its data\n";
+    echo "  vendor/bin/cassette list                      — list all recorded runs\n";
     exit(1);
 }
 
-$configPath   = __DIR__ . '/.data/state.json';
-$cassettesDir = __DIR__ . '/.data';
+// When installed via Composer the project root is three levels above the package dir:
+//   vendor/vielhuber/cassette  →  vendor/vielhuber  →  vendor  →  project root
+$projectRoot  = dirname(__DIR__, 3);
+$configPath   = $projectRoot . '/.cassette/state.json';
+$cassettesDir = $projectRoot . '/.cassette';
 
-$config = json_decode((string) file_get_contents($configPath), true) ?? [];
+// Ensure the data directory exists before reading state.
+if (!is_dir($cassettesDir)) {
+    mkdir($cassettesDir, 0775, true);
+}
+
+$config = file_exists($configPath)
+    ? (json_decode((string) file_get_contents($configPath), true) ?? [])
+    : [];
 
 switch ($command) {
     case 'record':
@@ -64,7 +73,7 @@ switch ($command) {
 
         echo "\033[33m● Recording started\033[0m  cassette: \033[1m$name\033[0m\n";
         echo "\n  Click through your flow in the browser, then run:\n";
-        echo "  \033[36mphp _cassette/cli stop $name\033[0m\n";
+        echo "  \033[36mvendor/bin/cassette stop $name\033[0m\n";
         break;
 
     case 'stop':
@@ -81,7 +90,7 @@ switch ($command) {
 
         echo "\033[32m✅ Recording stopped\033[0m  cassette: \033[1m$name\033[0m\n";
         echo "\n  Run when ready:\n";
-        echo "  \033[36mphp _cassette/cli replay $name\033[0m\n";
+        echo "  \033[36mvendor/bin/cassette replay $name\033[0m\n";
         break;
 
     case 'replay':
@@ -143,7 +152,7 @@ switch ($command) {
                 echo "\033[32m✅ All checks passed\033[0m\n";
             } else {
                 echo "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n";
-                echo "  Diff files: .data/$name/http/*.diff\n";
+                echo "  Diff files: .cassette/$name/http/*.diff\n";
             }
             exit($allPassed ? 0 : 1);
         }
@@ -215,7 +224,7 @@ switch ($command) {
             if ($screenshotExitCode !== 0)  { echo " [Screenshots]"; }
             echo "\n";
             if ($httpExitCode !== 0) {
-                echo "  Diff files: .data/$name/http/*.diff\n";
+                echo "  Diff files: .cassette/$name/http/*.diff\n";
             }
         }
 

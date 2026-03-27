@@ -10,14 +10,14 @@ declare(strict_types=1);
  * config.json), then compares the actual responses to the recorded ones.
  *
  * Usage:
- *   php /var/www/project/_cassette/src/CassetteReplay.php [cassette] [base_url]
+ *   php /var/www/project/vendor/vielhuber/cassette/src/CassetteReplay.php [cassette] [base_url]
  *
  * The base_url is optional — when omitted, the URL recorded during the
  * record run is used automatically (scheme + host from the captured request).
  * Override only when replaying against a different server:
  *
- *   php /var/www/project/_cassette/src/CassetteReplay.php run_001
- *   php /var/www/project/_cassette/src/CassetteReplay.php run_001 https://staging.example.com
+ *   php /var/www/project/vendor/vielhuber/cassette/src/CassetteReplay.php run_001
+ *   php /var/www/project/vendor/vielhuber/cassette/src/CassetteReplay.php run_001 https://staging.example.com
  *
  * Prerequisites:
  *   1. config.json must have "mode": "mock" so the server uses mocked DB/curl.
@@ -36,7 +36,8 @@ if (function_exists('uopz_allow_exit')) {
 $cassetteName = $argv[1] ?? 'run_001';
 $baseUrlOverride = isset($argv[2]) ? rtrim($argv[2], '/') : null;
 
-$cassettesDir = __DIR__ . '/../.data';
+// Four levels up from vendor/vielhuber/cassette/src/ = project root.
+$cassettesDir = dirname(__DIR__, 4) . '/.cassette';
 $httpLogPath = $cassettesDir . '/' . $cassetteName . '/http.json';
 $pointerPath = $cassettesDir . '/' . $cassetteName . '/data.pointer';
 

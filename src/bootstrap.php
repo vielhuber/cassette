@@ -9,7 +9,7 @@ declare(strict_types=1);
  *
  * --- Activation (web context — recommended) ------------------------------
  *
- * Create a control file at _cassette/.data/state.json:
+ * Create a control file at .cassette/state.json in the project root:
  *
  *   {"mode": "record", "name": "save_contract_01"}   ← record real calls
  *   {"mode": "mock",   "name": "save_contract_01"}   ← replay from cassette
@@ -19,7 +19,7 @@ declare(strict_types=1);
  *
  * Add one line to wp-config.php (before "stop editing" comment):
  *
- *   require_once __DIR__ . '/_cassette/src/bootstrap.php';
+ *   require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
  *
  * --- Activation (CLI context) --------------------------------------------
  *
@@ -31,7 +31,7 @@ declare(strict_types=1);
  * Or via auto_prepend_file without touching any source file:
  *
  *   CASSETTE_MODE=record CASSETTE_NAME=save_contract_01 \
- *     php -d auto_prepend_file=/var/www/project/_cassette/src/bootstrap.php \
+ *     php -d auto_prepend_file=/var/www/project/vendor/vielhuber/cassette/src/bootstrap.php \
  *     /var/www/project/index.php
  *
  * --- What happens when active -----------------------------------------
@@ -48,7 +48,9 @@ $cassetteName = (string) ($_SERVER['CASSETTE_NAME'] ?? (getenv('CASSETTE_NAME') 
 
 // Priority 2: control file (web requests, WordPress).
 if ($cassetteMode === '' || $cassetteName === '') {
-    $controlFile = __DIR__ . '/../.data/state.json';
+    // When installed via Composer the project root is four levels above src/:
+    //   vendor/vielhuber/cassette/src  →  vendor/vielhuber/cassette  →  vendor/vielhuber  →  vendor  →  project root
+    $controlFile = dirname(__DIR__, 4) . '/.cassette/state.json';
 
     if (is_file($controlFile)) {
         $control = json_decode((string) file_get_contents($controlFile), true);
@@ -66,7 +68,8 @@ if ($cassetteMode === '' || $cassetteName === '') {
 // Searches vendor/autoload.php in the site root and all theme/plugin directories.
 // Uses require_once, so including multiple loaders is always safe.
 (static function (): void {
-    $siteRoot = dirname(__DIR__, 2);
+    // Four levels up from vendor/vielhuber/cassette/src/ = project root.
+    $siteRoot = dirname(__DIR__, 4);
 
     $patterns = [
         $siteRoot . '/vendor/autoload.php',
@@ -84,7 +87,7 @@ if ($cassetteMode === '' || $cassetteName === '') {
 
 require_once __DIR__ . '/Cassette.php';
 
-Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: __DIR__ . '/../.data');
+Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette');
 
 // Install all uopz hooks (hooks read Cassette::getMode() at call time).
 require_once __DIR__ . '/CassetteHooks.php';
@@ -93,7 +96,7 @@ require_once __DIR__ . '/CassetteHooks.php';
 // can compare actual responses against recorded ones later.
 require_once __DIR__ . '/CassetteHttpRecorder.php';
 
-CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: __DIR__ . '/../.data');
+CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: dirname(__DIR__, 4) . '/.cassette');
 
 // Auto-save the tape when the PHP process exits (record mode only).
 // Persist the replay pointer after each mock request so the next request

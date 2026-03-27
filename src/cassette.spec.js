@@ -15,13 +15,13 @@ if (!cassetteName) {
     throw new Error('CASSETTE_NAME environment variable is required.');
 }
 
-const dataDir = path.join(__dirname, '../.data');
+const dataDir = path.join(__dirname, '../../../../.cassette');
 const runDir = path.join(dataDir, cassetteName);
 const httpLogPath = path.join(runDir, 'http.json');
 const pointerPath = path.join(runDir, 'data.pointer');
 
-// Load optional project config (config.json next to the cli script).
-const configPath = path.join(__dirname, '../config.json');
+// Load optional project config from the .cassette/ directory.
+const configPath = path.join(dataDir, 'config.json');
 const cassetteConfig = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
 const screenshotConfig = cassetteConfig.screenshot ?? {};
 const zoom = screenshotConfig.zoom ?? 0.7;

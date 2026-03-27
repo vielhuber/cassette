@@ -36,15 +36,13 @@ if (!extension_loaded('uopz')) {
 }
 
 // -----------------------------------------------------------------------
-// __::curl() — static method hook
+// __::curl() — static method hook (optional: only installed when vielhuber/stringhelper is available)
 // -----------------------------------------------------------------------
 
 if (!class_exists('vielhuber\stringhelper\__', true)) {
-    throw new \RuntimeException(
-        'Cassette: class vielhuber\\stringhelper\\__ could not be loaded. ' .
-            'Make sure the theme\'s Composer autoloader is present at wp-content/themes/*/vendor/autoload.php — ' .
-            'it is discovered automatically by bootstrap.php.'
-    );
+    // vielhuber/stringhelper is not loaded — curl interception is skipped.
+    // Add "vielhuber/stringhelper" to your project's composer.json to enable it.
+    return;
 }
 
 /**

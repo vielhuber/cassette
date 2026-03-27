@@ -1,8 +1,13 @@
 {
     "name": "vielhuber/cassette",
     "description": "Record real HTTP flows once, replay them deterministically as regression tests.",
-    "type": "library",
-    "require-dev": {
+    "require": {
+        "php": ">=8.3",
         "ascendens/php-uopz-hints": "^1.0"
-    }
+    },
+    "suggest": {
+        "vielhuber/stringhelper": "Required to intercept __::curl() calls during record/replay."
+    },
+    "bin": ["cli"],
+    "license": "MIT"
 }
