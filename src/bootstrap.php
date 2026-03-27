@@ -83,7 +83,7 @@ if ($cassetteMode === '' || $cassetteName === '') {
 }
 
 // No activation — skip everything (safe to require_once unconditionally).
-if ($cassetteMode === '' || $cassetteName === '') {
+if ($cassetteMode === '' || $cassetteMode === 'stopped' || $cassetteName === '') {
     return;
 }
 

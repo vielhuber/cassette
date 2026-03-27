@@ -105,9 +105,9 @@ switch ($command) {
             exit(1);
         }
 
-        // Deactivate recording — mode is cleared so bootstrap.php becomes a no-op.
-        // The name is preserved so replay/screenshot know which cassette to use.
-        $config['mode'] = '';
+        // Deactivate recording — mode is set to 'stopped' so bootstrap.php becomes a no-op.
+        // The name is preserved so replay knows which cassette to use.
+        $config['mode'] = 'stopped';
 
         file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
 
@@ -170,6 +170,8 @@ switch ($command) {
 
         if ($httpOnly) {
             $allPassed = ($httpExitCode === 0);
+            $config['mode'] = 'stopped';
+            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
             echo "\n" . str_repeat('─', 56) . "\n";
             if ($allPassed) {
                 echo "\033[32m✅ All checks passed\033[0m\n";
@@ -237,6 +239,8 @@ switch ($command) {
         );
 
         $allPassed = ($httpExitCode === 0 && $screenshotExitCode === 0);
+        $config['mode'] = 'stopped';
+        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         echo "\n" . str_repeat('─', 56) . "\n";
 
         if ($allPassed) {
@@ -300,7 +304,7 @@ switch ($command) {
                 deleteDir($cassettesDir . '/' . $run);
             }
 
-            $config['mode'] = '';
+            $config['mode'] = 'stopped';
             $config['name'] = '';
             file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
 
@@ -329,7 +333,7 @@ switch ($command) {
 
         // Clear config if it referenced this run.
         if (($config['name'] ?? '') === $name) {
-            $config['mode'] = '';
+            $config['mode'] = 'stopped';
             $config['name'] = '';
             file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         }
