@@ -1,0 +1,451 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+/**
+ * Cassette CLI helper.
+ *
+ * Usage:
+ *   php _cassette/cli record     <name>   — switch to record mode and clear old cassette
+ *   php _cassette/cli replay     <name>   — switch to mock mode and run the replay suite
+ *   php _cassette/cli accept     <name>   — interactively accept HTTP diffs as new baseline
+ *   php _cassette/cli screenshot <name>   — visual regression via Playwright
+ *   php _cassette/cli stop       <name>   — stop recording, keep data for later replay
+ *   php _cassette/cli delete     <name>   — delete a run and all its data
+ *   php _cassette/cli list               — list all recorded runs
+ */
+
+// Allow exit()/die() to actually terminate the process even when the uopz extension
+// is loaded (it disables exit by default to support testing code that calls exit).
+if (function_exists('uopz_allow_exit')) {
+    uopz_allow_exit(true);
+}
+
+$command = $argv[1] ?? '';
+$name    = $argv[2] ?? '';
+
+$nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delete'], true);
+
+if ($command === '' || ($nameRequired && $name === '')) {
+    echo "Usage:\n";
+    echo "  php _cassette/cli record  <name>            — record a new flow\n";
+    echo "  php _cassette/cli replay  <name> [--refresh] — HTTP diff + visual screenshot regression\n";
+    echo "  php _cassette/cli accept  <name>            — interactively accept HTTP diffs as new baseline\n";
+    echo "  php _cassette/cli stop    <name>            — stop recording, keep data for later replay\n";
+    echo "  php _cassette/cli delete  <name>            — delete a run and all its data\n";
+    echo "  php _cassette/cli list                      — list all recorded runs\n";
+    exit(1);
+}
+
+$configPath   = __DIR__ . '/.data/state.json';
+$cassettesDir = __DIR__ . '/.data';
+
+$config = json_decode((string) file_get_contents($configPath), true) ?? [];
+
+switch ($command) {
+    case 'record':
+        // Delete existing cassette files so a clean recording starts.
+        $toDelete = [
+            $cassettesDir . '/' . $name . '/data.json',
+            $cassettesDir . '/' . $name . '/data.pointer',
+            $cassettesDir . '/' . $name . '/http.json',
+        ];
+
+        foreach ($toDelete as $path) {
+            if (file_exists($path)) {
+                unlink($path);
+            }
+        }
+
+        $config['mode'] = 'record';
+        $config['name'] = $name;
+
+        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+
+        echo "\033[33m● Recording started\033[0m  cassette: \033[1m$name\033[0m\n";
+        echo "\n  Click through your flow in the browser, then run:\n";
+        echo "  \033[36mphp _cassette/cli stop $name\033[0m\n";
+        break;
+
+    case 'stop':
+        if (($config['mode'] ?? '') !== 'record' || ($config['name'] ?? '') !== $name) {
+            fwrite(STDERR, "Run '$name' is not currently recording.\n");
+            exit(1);
+        }
+
+        // Deactivate recording — mode is cleared so bootstrap.php becomes a no-op.
+        // The name is preserved so replay/screenshot know which cassette to use.
+        $config['mode'] = '';
+
+        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+
+        echo "\033[32m✅ Recording stopped\033[0m  cassette: \033[1m$name\033[0m\n";
+        echo "\n  Run when ready:\n";
+        echo "  \033[36mphp _cassette/cli replay $name\033[0m\n";
+        break;
+
+    case 'replay':
+        $refresh        = in_array('--refresh', $argv, true);
+        $httpOnly       = in_array('--http-only', $argv, true);
+        $screenshotOnly = in_array('--screenshot-only', $argv, true);
+
+        if ($httpOnly && $screenshotOnly) {
+            fwrite(STDERR, "--http-only and --screenshot-only are mutually exclusive.\n");
+            exit(1);
+        }
+
+        // Optional --base-url=https://... override so runs recorded on one host
+        // can be replayed on a different host (CI, local, staging, ...).
+        $baseUrl = null;
+        foreach ($argv as $arg) {
+            if (str_starts_with($arg, '--base-url=')) {
+                $baseUrl = rtrim(substr($arg, strlen('--base-url=')), '/');
+                break;
+            }
+        }
+
+        // --- Step 1: HTTP body diff ---
+        $config['mode'] = 'mock';
+        $config['name'] = $name;
+
+        file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+
+        // Clear stale diff files from previous runs before replaying.
+        $httpDiffDir = $cassettesDir . '/' . $name . '/http';
+        foreach (glob($httpDiffDir . '/*.diff') ?: [] as $diff) {
+            unlink($diff);
+        }
+
+        $httpExitCode = 0;
+
+        if (!$screenshotOnly) {
+            echo "\033[1m── HTTP replay ─────────────────────────────────────────\033[0m\n";
+            $replayScript = __DIR__ . '/src/CassetteReplay.php';
+            $replayArgs   = escapeshellarg($name) . ($baseUrl !== null ? ' ' . escapeshellarg($baseUrl) : '');
+            passthru("php $replayScript $replayArgs", $httpExitCode);
+
+            if ($httpExitCode !== 0) {
+                $remaining   = interactiveAcceptDiffs(
+                    $cassettesDir . '/' . $name . '/http',
+                    $cassettesDir . '/' . $name . '/http.json'
+                );
+                $httpExitCode = $remaining > 0 ? 1 : 0;
+            }
+        }
+
+        // --- Step 2: Visual (Playwright) regression ---
+        $screenshotExitCode = 0;
+
+        if ($httpOnly) {
+            $allPassed = ($httpExitCode === 0);
+            echo "\n" . str_repeat('─', 56) . "\n";
+            if ($allPassed) {
+                echo "\033[32m✅ All checks passed\033[0m\n";
+            } else {
+                echo "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n";
+                echo "  Diff files: .data/$name/http/*.diff\n";
+            }
+            exit($allPassed ? 0 : 1);
+        }
+
+        echo "\n\033[1m── Screenshot replay ───────────────────────────────────\033[0m\n";
+
+        // Auto-install Node.js dependencies on first use.
+        if (!is_dir(__DIR__ . '/node_modules')) {
+            echo "  Installing Node.js dependencies...\n";
+            passthru('cd ' . escapeshellarg(__DIR__) . ' && npm install --silent', $npmExit);
+
+            if ($npmExit !== 0) {
+                fwrite(STDERR, "\033[31m⛔ npm install failed. Cannot run Playwright tests.\033[0m\n");
+                exit(1);
+            }
+        }
+
+        // Auto-install Playwright browser binary on first use.
+        $chromiumMarker = __DIR__ . '/node_modules/.playwright-browsers-installed';
+
+        if (!file_exists($chromiumMarker)) {
+            echo "  Installing Playwright browser...\n";
+            passthru('cd ' . escapeshellarg(__DIR__) . ' && npx playwright install chromium', $pwExit);
+
+            if ($pwExit !== 0) {
+                fwrite(STDERR, "\033[31m⛔ Playwright browser install failed.\033[0m\n");
+                exit(1);
+            }
+
+            file_put_contents($chromiumMarker, '1');
+        }
+
+        // mock mode is already active; cassette.spec.js resets the pointer
+        // to 0 in test.beforeAll() so the screenshot run starts from request bucket 0.
+
+        $snapshotDir = $cassettesDir . '/' . $name . '/screenshots';
+
+        // --refresh: wipe existing baselines so they are recreated from scratch.
+        if ($refresh && is_dir($snapshotDir)) {
+            foreach (glob($snapshotDir . '/*.png') ?: [] as $png) {
+                unlink($png);
+            }
+        }
+
+        // First run (no baseline yet) or --refresh → create snapshots.
+        // Subsequent runs → compare against existing baselines.
+        $hasBaselines = is_dir($snapshotDir) && !empty(glob($snapshotDir . '/*.png'));
+        $updateFlag   = $hasBaselines ? '' : ' --update-snapshots';
+
+        $configFile = escapeshellarg(__DIR__ . '/src/playwright.config.js');
+        $env        = 'CASSETTE_NAME=' . escapeshellarg($name);
+        if ($baseUrl !== null) {
+            $env .= ' CASSETTE_BASE_URL=' . escapeshellarg($baseUrl);
+        }
+
+        passthru(
+            'cd ' . escapeshellarg(__DIR__) . " && $env npx playwright test --config=$configFile$updateFlag",
+            $screenshotExitCode
+        );
+
+        $allPassed = ($httpExitCode === 0 && $screenshotExitCode === 0);
+        echo "\n" . str_repeat('─', 56) . "\n";
+
+        if ($allPassed) {
+            echo "\033[32m✅ All checks passed\033[0m\n";
+        } else {
+            echo "\033[31m⛔ Checks failed\033[0m";
+            if ($httpExitCode !== 0)        { echo " [HTTP diff]"; }
+            if ($screenshotExitCode !== 0)  { echo " [Screenshots]"; }
+            echo "\n";
+            if ($httpExitCode !== 0) {
+                echo "  Diff files: .data/$name/http/*.diff\n";
+            }
+        }
+
+        exit($allPassed ? 0 : 1);
+
+    case 'accept':
+        $httpDiffDir = $cassettesDir . '/' . $name . '/http';
+        $diffFiles   = glob($httpDiffDir . '/*.diff') ?: [];
+
+        if (empty($diffFiles)) {
+            echo "\033[32m✅ No open diffs for:\033[0m $name\n";
+            break;
+        }
+
+        $remaining = interactiveAcceptDiffs(
+            $httpDiffDir,
+            $cassettesDir . '/' . $name . '/http.json'
+        );
+        exit($remaining > 0 ? 1 : 0);
+
+    case 'delete':
+        $deleteAll = in_array('--all', $argv, true);
+        $force     = in_array('--force', $argv, true);
+
+        if ($deleteAll) {
+            $runs = array_filter(
+                scandir($cassettesDir) ?: [],
+                static fn(string $entry): bool =>
+                    $entry !== '.' && $entry !== '..' &&
+                    is_dir($cassettesDir . '/' . $entry) &&
+                    file_exists($cassettesDir . '/' . $entry . '/data.json')
+            );
+
+            if (empty($runs)) {
+                echo "No runs to delete.\n";
+                break;
+            }
+
+            if (!$force) {
+                echo "Delete \033[33m" . count($runs) . " run(s)\033[0m and all their data? [y/n] ";
+                $answer = strtolower(trim((string) fgets(STDIN)));
+
+                if ($answer !== 'y') {
+                    echo "Aborted.\n";
+                    exit(1);
+                }
+            }
+
+            foreach ($runs as $run) {
+                deleteDir($cassettesDir . '/' . $run);
+            }
+
+            $config['mode'] = '';
+            $config['name'] = '';
+            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+
+            echo "\033[32m✅ Deleted " . count($runs) . " run(s).\033[0m\n";
+            break;
+        }
+
+        $runDir = $cassettesDir . '/' . $name;
+
+        if ($name === '' || !is_dir($runDir)) {
+            fwrite(STDERR, "Run not found: $name\n");
+            exit(1);
+        }
+
+        if (!$force) {
+            echo "Delete run \033[33m$name\033[0m and all its data? [y/n] ";
+            $answer = strtolower(trim((string) fgets(STDIN)));
+
+            if ($answer !== 'y') {
+                echo "Aborted.\n";
+                exit(1);
+            }
+        }
+
+        deleteDir($runDir);
+
+        // Clear config if it referenced this run.
+        if (($config['name'] ?? '') === $name) {
+            $config['mode'] = '';
+            $config['name'] = '';
+            file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        }
+
+        echo "\033[32m✅ Deleted run:\033[0m $name\n";
+        break;
+
+    case 'list':
+        $runs = array_filter(
+            scandir($cassettesDir) ?: [],
+            static fn(string $entry): bool =>
+                $entry !== '.' && $entry !== '..' &&
+                is_dir($cassettesDir . '/' . $entry) &&
+                file_exists($cassettesDir . '/' . $entry . '/data.json')
+        );
+
+        if (empty($runs)) {
+            echo "  No runs recorded yet.\n";
+            break;
+        }
+
+        $active = (($config['mode'] ?? '') !== '') ? ($config['name'] ?? '') : '';
+
+        foreach (array_values($runs) as $run) {
+            $screenshots = glob($cassettesDir . '/' . $run . '/screenshots/*.png') ?: [];
+            $httpLog     = $cassettesDir . '/' . $run . '/http.json';
+            $requests    = 0;
+
+            if (file_exists($httpLog)) {
+                $requests = count(json_decode((string) file_get_contents($httpLog), true) ?? []);
+            }
+
+            $marker         = $run === $active ? " \033[33m← active\033[0m" : '';
+            $screenshotInfo = count($screenshots) > 0 ? '  ' . count($screenshots) . ' screenshot(s)' : '';
+            $icon           = $run === $active ? '●' : '○';
+
+            echo sprintf("  \033[36m%s\033[0m %-28s %d request(s)%s%s\n", $icon, $run, $requests, $screenshotInfo, $marker);
+        }
+        break;
+
+    default:
+        fwrite(STDERR, "\033[31m⛔ Unknown command: $command\033[0m\n");
+        fwrite(STDERR, "Valid commands: record, replay, accept, stop, delete, list\n");
+        exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Show each .diff file interactively and let the user accept or skip.
+ * On accept the corresponding http.json entry is updated in-place and
+ * the .diff / .actual files are removed.
+ *
+ * @return int Number of diffs that were NOT accepted (i.e. still failing).
+ */
+function interactiveAcceptDiffs(string $httpDiffDir, string $httpLogPath): int
+{
+    $diffFiles = glob($httpDiffDir . '/*.diff') ?: [];
+
+    if (empty($diffFiles)) {
+        return 0;
+    }
+
+    if (!file_exists($httpLogPath)) {
+        fwrite(STDERR, "http.json not found: $httpLogPath\n");
+        return count($diffFiles);
+    }
+
+    $httpLog  = json_decode((string) file_get_contents($httpLogPath), true) ?? [];
+    $accepted = 0;
+    $skipped  = 0;
+
+    foreach ($diffFiles as $diffFile) {
+        $step       = (int) basename($diffFile, '.diff');
+        $entryIndex = $step - 1;
+        $actualFile = substr($diffFile, 0, -5) . '.actual';
+
+        echo "\n" . str_repeat('─', 56) . "\n";
+        echo file_get_contents($diffFile);
+        echo str_repeat('─', 56) . "\n";
+
+        if (!file_exists($actualFile)) {
+            echo "\033[33m⚠ No .actual file found — re-run replay first.\033[0m\n";
+            $skipped++;
+            continue;
+        }
+
+        if (!isset($httpLog[$entryIndex])) {
+            echo "\033[33m⚠ Entry #$step not found in http.json.\033[0m\n";
+            $skipped++;
+            continue;
+        }
+
+        echo "[a] accept  [s] skip  > ";
+        fflush(STDOUT);
+        $answer = strtolower(trim((string) fgets(STDIN)));
+
+        if ($answer !== 'a') {
+            echo "  Skipped.\n";
+            $skipped++;
+            continue;
+        }
+
+        $httpLog[$entryIndex]['response']['body'] = (string) file_get_contents($actualFile);
+        unlink($diffFile);
+        unlink($actualFile);
+        echo "  \033[32mAccepted.\033[0m\n";
+        $accepted++;
+    }
+
+    if ($accepted > 0) {
+        file_put_contents(
+            $httpLogPath,
+            json_encode($httpLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n"
+        );
+    }
+
+    echo "\n" . str_repeat('─', 56) . "\n";
+    echo "\033[32m$accepted accepted\033[0m, $skipped skipped.\n";
+
+    return $skipped;
+}
+
+/**
+ * Recursively delete all files and subdirectories inside a directory,
+ * then remove the directory itself.
+ */
+function deleteDir(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+
+    foreach (scandir($dir) as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+
+        $path = $dir . '/' . $entry;
+
+        if (is_dir($path)) {
+            deleteDir($path);
+        } else {
+            unlink($path);
+        }
+    }
+
+    rmdir($dir);
+}

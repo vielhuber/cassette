@@ -1,0 +1,8 @@
+{
+    "screenshot": {
+        "headless": true,
+        "zoom": 0.7,
+        "maxDiffPixelRatio": 0.01,
+        "maskSelectors": []
+    }
+}

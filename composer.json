@@ -1,0 +1,8 @@
+{
+    "name": "vielhuber/cassette",
+    "description": "Record real HTTP flows once, replay them deterministically as regression tests.",
+    "type": "library",
+    "require-dev": {
+        "ascendens/php-uopz-hints": "^1.0"
+    }
+}

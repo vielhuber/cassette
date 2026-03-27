@@ -1,0 +1,7 @@
+{
+    "name": "cassette",
+    "private": true,
+    "dependencies": {
+        "@playwright/test": "^1.58.2"
+    }
+}
