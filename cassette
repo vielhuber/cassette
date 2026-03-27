@@ -6,12 +6,12 @@ declare(strict_types=1);
  * Cassette CLI helper.
  *
  * Usage:
- *   vendor/bin/cassette record     <name>   — switch to record mode and clear old cassette
- *   vendor/bin/cassette replay     <name>   — switch to mock mode and run the replay suite
- *   vendor/bin/cassette accept     <name>   — interactively accept HTTP diffs as new baseline
- *   vendor/bin/cassette stop       <name>   — stop recording, keep data for later replay
- *   vendor/bin/cassette delete     <name>   — delete a run and all its data
- *   vendor/bin/cassette list               — list all recorded runs
+ *   vendor/bin/cassette record     <name> [--root=/path]  — switch to record mode and clear old cassette
+ *   vendor/bin/cassette replay     <name> [--root=/path]  — switch to mock mode and run the replay suite
+ *   vendor/bin/cassette accept     <name> [--root=/path]  — interactively accept HTTP diffs as new baseline
+ *   vendor/bin/cassette stop       <name> [--root=/path]  — stop recording, keep data for later replay
+ *   vendor/bin/cassette delete     <name> [--root=/path]  — delete a run and all its data
+ *   vendor/bin/cassette list               [--root=/path]  — list all recorded runs
  */
 
 // Allow exit()/die() to actually terminate the process even when the uopz extension
@@ -22,6 +22,16 @@ if (function_exists('uopz_allow_exit')) {
 
 $command = $argv[1] ?? '';
 $name    = $argv[2] ?? '';
+
+// Parse --root=<path> from any position in argv.
+$projectRootOverride = null;
+foreach ($argv as $__arg) {
+    if (str_starts_with($__arg, '--root=')) {
+        $projectRootOverride = rtrim(substr($__arg, 7), '/');
+        break;
+    }
+}
+unset($__arg);
 
 $nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delete'], true);
 
@@ -50,7 +60,7 @@ foreach ($__parts as $__part) {
     $__segments[] = $__part;
 }
 // vendor/bin/<script> — remove last 3 path segments to reach project root.
-$projectRoot = '/' . implode('/', array_slice($__segments, 0, -3));
+$projectRoot = $projectRootOverride ?? ('/' . implode('/', array_slice($__segments, 0, -3)));
 unset($__rawInvocation, $__parts, $__segments, $__part);
 $configPath   = $projectRoot . '/.cassette/state.json';
 $cassettesDir = $projectRoot . '/.cassette/runs';

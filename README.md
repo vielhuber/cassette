@@ -41,6 +41,19 @@ All run data is stored in `.cassette/runs/<name>/`. Screenshot baselines are sto
 
 Add `.cassette/state.json` to `.gitignore` to avoid committing the active mode flag.
 
+## Development workflow (working on cassette itself)
+
+When developing cassette alongside a project, you can run the CLI directly from the cassette source directory and point it at the target project via `--root`:
+
+```bash
+cd /var/www/cassette
+./cassette record run_001 --root=/var/www/my-project
+./cassette stop   run_001 --root=/var/www/my-project
+./cassette replay run_001 --root=/var/www/my-project
+```
+
+This way the target project's `composer.json` stays completely untouched — no path-repository, no `minimum-stability`, no symlinks. All cassette data is read from and written to `/var/www/my-project/.cassette/` as usual.
+
 ## Portability
 
 Recordings are captured on one host (e.g. `https://custom-tld.dev`) but can be
