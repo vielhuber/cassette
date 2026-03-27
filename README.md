@@ -39,7 +39,11 @@ Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
 All run data is stored in `.cassette/runs/<name>/`. Screenshot baselines are stored in `.cassette/runs/<name>/screenshots/` and should be committed to git.
 
-Add `.cassette/state.json` to `.gitignore` to avoid committing the active mode flag.
+If runs should **not** be tracked in git at all, add the entire directory to `.gitignore`:
+
+```
+/.cassette/
+```
 
 ## Development workflow (working on cassette itself)
 
