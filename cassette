@@ -52,6 +52,15 @@ if (!is_dir(dirname($cassettesDir))) {
     mkdir(dirname($cassettesDir), 0775, true);
 }
 
+// Auto-create .cassette/config.json from the bundled example if not yet present.
+$projectConfigPath = dirname($cassettesDir) . '/config.json';
+if (!file_exists($projectConfigPath)) {
+    $examplePath = __DIR__ . '/config.example.json';
+    if (file_exists($examplePath)) {
+        copy($examplePath, $projectConfigPath);
+    }
+}
+
 $config = file_exists($configPath)
     ? (json_decode((string) file_get_contents($configPath), true) ?? [])
     : [];

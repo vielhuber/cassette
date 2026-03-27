@@ -21,12 +21,7 @@ require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
 
 The bootstrap is a no-op when no cassette is active, so it is always safe to keep this line in place.
 
-**Optional config** — copy the example and adjust screenshot settings:
-
-```bash
-mkdir -p .cassette
-cp vendor/vielhuber/cassette/config.example.json .cassette/config.json
-```
+`.cassette/config.json` is created automatically on the first `vendor/bin/cassette record` call.
 
 ## Usage
 
