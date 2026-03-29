@@ -21,7 +21,9 @@ module.exports = defineConfig({
     // order they were recorded so the mock pointer stays aligned.
     workers: 1,
 
-    reporter: 'list',
+    // Suppress Playwright's built-in verbose output — step lines and diff paths
+    // are logged directly via console.log inside cassette.spec.js.
+    reporter: 'null',
 
     // Overall test timeout: steps * per-step timeout, with a generous minimum.
     // This prevents the whole test from timing out on long runs.

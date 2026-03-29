@@ -111,14 +111,16 @@ Create `.cassette/config.json` to customise screenshot behaviour per project:
         "headless": true,
         "zoom": 0.7,
         "maxDiffPixelRatio": 0.01,
-        "maskSelectors": [".footer__meta"]
+        "maskSelectors": [".footer__meta"],
+        "maskDates": true
     }
 }
 ```
 
-| Key                            | Default | Description                                                    |
-| ------------------------------ | ------- | -------------------------------------------------------------- |
-| `screenshot.headless`          | `true`  | Run Playwright in headless mode                                |
-| `screenshot.zoom`              | `0.7`   | CSS zoom applied to `<html>` before each screenshot            |
-| `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                   |
-| `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot |
+| Key                            | Default | Description                                                                                                                                                                                          |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `screenshot.headless`          | `true`  | Run Playwright in headless mode                                                                                                                                                                      |
+| `screenshot.zoom`              | `0.7`   | CSS zoom applied to `<html>` before each screenshot                                                                                                                                                  |
+| `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                                                                                                                                                         |
+| `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot (uses direct DOM manipulation, so `position: fixed` elements are reliably hidden)                                                      |
+| `screenshot.maskDates`         | `true`  | Automatically hide all date and time values in the page (ISO dates `2026-03-29`, German dates `29.03.2026`, times `12:34` / `12:34:56`) including `<input type="date">` values and plain text nodes |

@@ -115,7 +115,9 @@ foreach ($log as $index => $entry) {
     // mid-session (e.g. after a POST) are active for subsequent requests.
     mergeCookiesIntoJar($request['cookies'] ?? [], parse_url($baseUrl, PHP_URL_HOST) ?? 'localhost', $cookieJar);
 
-    $label = sprintf('#%d  %-4s  %s%s', $index + 1, $request['method'], $baseUrl, $request['uri']);
+    $fullUrl = $baseUrl . $request['uri'];
+    $displayUrl = mb_strlen($fullUrl) > 100 ? mb_substr($fullUrl, 0, 100) . '…' : $fullUrl;
+    $label = sprintf('#%d  %-4s  %s', $index + 1, $request['method'], $displayUrl);
 
     [$actualStatus, $actualBody] = executeRequest($request, $baseUrl, $cookieJar);
 
@@ -326,14 +328,32 @@ function normalizeBody(string $body): string
     // German date/time format (e.g. "26.03.2026 13:42" in page titles / "Stand" values).
     $body = preg_replace('/\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}/', '__TIMESTAMP__', $body) ?? $body;
 
-    // Unix timestamps (10-digit numbers) in JSON/JS assignments.
-    $body = preg_replace('/(?<=[:\[,\s])\d{10}(?=[,\]\}\s])/', '__UNIXTS__', $body) ?? $body;
+    // ISO 8601 date only (2026-03-29)
+    $body = preg_replace('/\b\d{4}-\d{2}-\d{2}\b/', '__DATE__', $body) ?? $body;
+
+    // German date only (29.03.2026)
+    $body = preg_replace('/\b\d{2}\.\d{2}\.\d{4}\b/', '__DATE__', $body) ?? $body;
+
+    // Time only (12:34 or 12:34:56)
+    $body = preg_replace('/\b\d{2}:\d{2}(:\d{2})?\b/', '__TIME__', $body) ?? $body;
 
     // Random cache-buster query params on static file URLs (e.g. ?rand=132 or &rand=132 or &amp;rand=132).
     $body = preg_replace('/(?:\?|&amp;|&)rand=\d+/', '&rand=__RAND__', $body) ?? $body;
 
     // Page render timing in footer (e.g. | 6,25s | or | 0.52s |).
     $body = preg_replace('/\|\s*[\d,.]+s\s*\|/', '| __TIME__ |', $body) ?? $body;
+
+    // <input type="date"> values change daily (e.g. default = today).
+    // Normalise value="YYYY-MM-DD" in any date input regardless of other attributes.
+    $body = (string) preg_replace_callback(
+        '/<input\b([^>]*)\btype="date"([^>]*)>/i',
+        static function (array $m): string {
+            $before = (string) preg_replace('/\bvalue="[^"]*"/', 'value="__DATE__"', $m[1]);
+            $after  = (string) preg_replace('/\bvalue="[^"]*"/', 'value="__DATE__"', $m[2]);
+            return '<input' . $before . 'type="date"' . $after . '>';
+        },
+        $body
+    ) ?? $body;
 
     return trim($body);
 }
