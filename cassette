@@ -38,7 +38,7 @@ $nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delet
 if ($command === '' || ($nameRequired && $name === '')) {
     echo "Usage:\n";
     echo "  vendor/bin/cassette record  <name>            — record a new flow\n";
-    echo "  vendor/bin/cassette replay  <name> [--refresh] — HTTP diff + visual screenshot regression\n";
+    echo "  vendor/bin/cassette replay  <name> [--refresh] [--debug] — HTTP diff + visual screenshot regression\n";
     echo "  vendor/bin/cassette accept  <name>            — interactively accept HTTP diffs as new baseline\n";
     echo "  vendor/bin/cassette stop    <name>            — stop recording, keep data for later replay\n";
     echo "  vendor/bin/cassette delete  <name>            — delete a run and all its data\n";
@@ -140,6 +140,7 @@ switch ($command) {
         $refresh        = in_array('--refresh', $argv, true);
         $httpOnly       = in_array('--http-only', $argv, true);
         $screenshotOnly = in_array('--screenshot-only', $argv, true);
+        $debugMode      = in_array('--debug', $argv, true);
 
         if ($httpOnly && $screenshotOnly) {
             fwrite(STDERR, "--http-only and --screenshot-only are mutually exclusive.\n");
@@ -250,6 +251,9 @@ switch ($command) {
         $env        = 'CASSETTE_ROOT=' . escapeshellarg($projectRoot) . ' CASSETTE_NAME=' . escapeshellarg($name);
         if ($baseUrl !== null) {
             $env .= ' CASSETTE_BASE_URL=' . escapeshellarg($baseUrl);
+        }
+        if ($debugMode) {
+            $env .= ' CASSETTE_DEBUG=1';
         }
 
         passthru(

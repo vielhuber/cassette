@@ -102,7 +102,10 @@ final class Cassette
             // Load existing buckets so subsequent requests are appended correctly.
             if (file_exists(self::$cassettePath)) {
                 $raw = (string) file_get_contents(self::$cassettePath);
-                $decoded = json_decode($raw, true);
+                // Support gzip-compressed files (written by save()) as well as
+                // legacy plain-text files recorded before compression was added.
+                $decompressed = @gzdecode($raw);
+                $decoded = json_decode($decompressed !== false ? $decompressed : $raw, true);
                 // Support both the new list-of-buckets format and a legacy
                 // flat map (old cassette files).  Legacy files are discarded so
                 // a clean recording starts from scratch.
@@ -119,6 +122,16 @@ final class Cassette
             if (file_exists(self::$pointerPath)) {
                 unlink(self::$pointerPath);
             }
+
+            // When starting a brand-new recording run (no existing data buckets),
+            // also clear the HTTP log so stale entries from a previous run that
+            // pre-date any ignoreUrls config do not carry over.
+            if (self::$requestIndex === 0) {
+                $httpLogPath = dirname(self::$cassettePath) . '/http.json';
+                if (file_exists($httpLogPath)) {
+                    unlink($httpLogPath);
+                }
+            }
         }
 
         if ($mode === self::MODE_MOCK) {
@@ -127,7 +140,9 @@ final class Cassette
             }
 
             $raw = (string) file_get_contents(self::$cassettePath);
-            self::$allRequests = json_decode($raw, true) ?? [];
+            // Support gzip-compressed files as well as legacy plain-text files.
+            $decompressed = @gzdecode($raw);
+            self::$allRequests = json_decode($decompressed !== false ? $decompressed : $raw, true) ?? [];
 
             // Read the current request index from the pointer file.
             if (file_exists(self::$pointerPath)) {
@@ -180,7 +195,10 @@ final class Cassette
 
         file_put_contents(
             self::$cassettePath,
-            json_encode(self::$allRequests, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            gzencode(
+                (string) json_encode(self::$allRequests, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                6
+            )
         );
     }
 

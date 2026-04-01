@@ -36,6 +36,19 @@ final class CassetteHttpRecorder
             return;
         }
 
+        // Skip recording when the request URI matches an entry in the ignore list.
+        $configPath = dirname($basePath) . '/config.json';
+        if (is_file($configPath)) {
+            $config = json_decode((string) file_get_contents($configPath), true) ?? [];
+            $ignorePatterns = $config['ignoreUrls'] ?? [];
+            $requestUri = $_SERVER['REQUEST_URI'] ?? '/';
+            foreach ($ignorePatterns as $pattern) {
+                if (str_contains($requestUri, (string) $pattern)) {
+                    return;
+                }
+            }
+        }
+
         self::$logPath = rtrim($basePath, '/') . '/' . $cassetteName . '/http.json';
         self::$requestSnapshot = self::captureRequest();
 
@@ -52,6 +65,21 @@ final class CassetteHttpRecorder
             0,
             PHP_OUTPUT_HANDLER_STDFLAGS
         );
+
+        // ob_start() prevents PHP from physically sending bytes to the client,
+        // which keeps headers_sent() returning false for the entire request.
+        // In a real (non-buffered) replay request, headers_sent() becomes true
+        // immediately after the first echo — app code that uses headers_sent()
+        // to choose between "direct echo" and "store in cookie for next request"
+        // (e.g. flash-message helpers) therefore behaves differently during
+        // recording than during replay. Fix: override headers_sent() via uopz
+        // to return true once any content has been written into the output buffer,
+        // mirroring exactly what happens in a non-buffered request.
+        if (function_exists('uopz_set_return')) {
+            uopz_set_return('headers_sent', static function (): bool {
+                return ob_get_length() > 0;
+            }, true);
+        }
     }
 
     // -------------------------------------------------------------------
@@ -75,7 +103,10 @@ final class CassetteHttpRecorder
         $log = [];
 
         if (file_exists(self::$logPath)) {
-            $log = json_decode((string) file_get_contents(self::$logPath), true) ?? [];
+            $raw = (string) file_get_contents(self::$logPath);
+            // Support gzip-compressed files as well as legacy plain-text files.
+            $decompressed = @gzdecode($raw);
+            $log = json_decode($decompressed !== false ? $decompressed : $raw, true) ?? [];
         }
 
         $log[] = $entry;
@@ -88,7 +119,10 @@ final class CassetteHttpRecorder
 
         file_put_contents(
             self::$logPath,
-            json_encode($log, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            gzencode(
+                (string) json_encode($log, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                6
+            )
         );
     }
 

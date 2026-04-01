@@ -61,7 +61,9 @@ if ($raw === false) {
     exit(1);
 }
 
-$log = json_decode($raw, true) ?? [];
+// Support gzip-compressed files as well as legacy plain-text files.
+$decompressed = @gzdecode($raw);
+$log = json_decode($decompressed !== false ? $decompressed : $raw, true) ?? [];
 
 if (empty($log)) {
     fwrite(STDERR, "No recorded HTTP exchanges in: $httpLogPath\n");
@@ -84,6 +86,26 @@ file_put_contents($pointerPath, json_encode(['_request_index' => 0], JSON_PRETTY
 // -------------------------------------------------------------------
 // Replay
 // -------------------------------------------------------------------
+
+// Load ignoreUrls from config.json so entries that were recorded before the
+// pattern was added (or slipped through) are silently skipped during replay.
+$cassetteConfigPath = dirname($cassettesDir) . '/config.json';
+$ignoreUrls = [];
+if (is_file($cassetteConfigPath)) {
+    $cassetteConfig = json_decode((string) file_get_contents($cassetteConfigPath), true) ?? [];
+    $ignoreUrls = $cassetteConfig['ignoreUrls'] ?? [];
+}
+
+// Filter out ignored entries before replaying so the pointer stays in sync.
+$log = array_values(array_filter($log, static function (array $entry) use ($ignoreUrls): bool {
+    $uri = $entry['request']['uri'] ?? '/';
+    foreach ($ignoreUrls as $pattern) {
+        if (str_contains($uri, (string) $pattern)) {
+            return false;
+        }
+    }
+    return true;
+}));
 
 // Derive default base URL from the first recorded request when no override given.
 $defaultBaseUrl = $baseUrlOverride ?? ($log[0]['request']['base_url'] ?? 'http://localhost');
@@ -359,30 +381,95 @@ function normalizeBody(string $body): string
 }
 
 /**
- * Compute a simple line-based diff between two strings.
+ * Compute a unified-style line diff between two strings using LCS.
  *
- * Returns lines prefixed with "- " (expected) and "+ " (actual).
+ * Returns lines prefixed with "- " (expected only) and "+ " (actual only).
+ * Unchanged lines are omitted. A context of 3 surrounding lines is shown
+ * to help locate each change.
  *
  * @return list<string>
  */
 function computeDiff(string $expected, string $actual): array
 {
     $expectedLines = explode("\n", $expected);
-    $actualLines = explode("\n", $actual);
-    $diff = [];
-    $maxLines = max(count($expectedLines), count($actualLines));
+    $actualLines   = explode("\n", $actual);
 
-    for ($i = 0; $i < $maxLines; $i++) {
-        $e = $expectedLines[$i] ?? '';
-        $a = $actualLines[$i] ?? '';
+    $m = count($expectedLines);
+    $n = count($actualLines);
 
-        if ($e !== $a) {
-            $diff[] = '- ' . $e;
-            $diff[] = '+ ' . $a;
+    // Build LCS table (only store two rows to save memory).
+    // $dp[$i][$j] = length of LCS for $expectedLines[0..$i-1] vs $actualLines[0..$j-1].
+    $prev = array_fill(0, $n + 1, 0);
+    $curr = array_fill(0, $n + 1, 0);
+    $table = [];
+    for ($i = 0; $i <= $m; $i++) {
+        for ($j = 0; $j <= $n; $j++) {
+            if ($i === 0 || $j === 0) {
+                $curr[$j] = 0;
+            } elseif ($expectedLines[$i - 1] === $actualLines[$j - 1]) {
+                $curr[$j] = $prev[$j - 1] + 1;
+            } else {
+                $curr[$j] = max($prev[$j], $curr[$j - 1]);
+            }
+        }
+        $table[$i] = $curr;
+        $prev = $curr;
+    }
+
+    // Back-track to produce edit operations:
+    //   'K' = keep (both), 'D' = delete (expected only), 'A' = add (actual only).
+    $edits = [];
+    $i = $m;
+    $j = $n;
+    while ($i > 0 || $j > 0) {
+        if ($i > 0 && $j > 0 && $expectedLines[$i - 1] === $actualLines[$j - 1]) {
+            $edits[] = ['K', $expectedLines[$i - 1]];
+            $i--;
+            $j--;
+        } elseif ($j > 0 && ($i === 0 || $table[$i][$j - 1] >= $table[$i - 1][$j])) {
+            $edits[] = ['A', $actualLines[$j - 1]];
+            $j--;
+        } else {
+            $edits[] = ['D', $expectedLines[$i - 1]];
+            $i--;
+        }
+    }
+    $edits = array_reverse($edits);
+
+    // Render with 3-line context around each changed block.
+    $CONTEXT = 3;
+    $total = count($edits);
+    $showLine = array_fill(0, $total, false);
+
+    for ($idx = 0; $idx < $total; $idx++) {
+        if ($edits[$idx][0] !== 'K') {
+            for ($c = max(0, $idx - $CONTEXT); $c <= min($total - 1, $idx + $CONTEXT); $c++) {
+                $showLine[$c] = true;
+            }
         }
     }
 
-    return $diff;
+    $result = [];
+    $lastShown = -1;
+    for ($idx = 0; $idx < $total; $idx++) {
+        if (!$showLine[$idx]) {
+            continue;
+        }
+        if ($lastShown >= 0 && $idx > $lastShown + 1) {
+            $result[] = '  @@ ...';
+        }
+        [$op, $line] = $edits[$idx];
+        if ($op === 'K') {
+            $result[] = '    ' . $line;
+        } elseif ($op === 'D') {
+            $result[] = '-   ' . $line;
+        } else {
+            $result[] = '+   ' . $line;
+        }
+        $lastShown = $idx;
+    }
+
+    return $result;
 }
 
 /**

@@ -1,3 +1,11 @@
+[![GitHub Tag](https://img.shields.io/github/v/tag/vielhuber/cassette)](https://github.com/vielhuber/cassette/tags)
+[![Code Style](https://img.shields.io/badge/code_style-psr--12-ff69b4.svg)](https://www.php-fig.org/psr/psr-12/)
+[![License](https://img.shields.io/github/license/vielhuber/cassette)](https://github.com/vielhuber/cassette/blob/main/LICENSE.md)
+[![Last Commit](https://img.shields.io/github/last-commit/vielhuber/cassette)](https://github.com/vielhuber/cassette/commits)
+[![PHP Version Support](https://img.shields.io/packagist/php-v/vielhuber/cassette)](https://packagist.org/packages/vielhuber/cassette)
+[![Packagist Downloads](https://img.shields.io/packagist/dt/vielhuber/cassette)](https://packagist.org/packages/vielhuber/cassette)
+[![npm Downloads](https://img.shields.io/npm/dt/cassette)](https://www.npmjs.com/package/cassette)
+
 # 📼 cassette 📼
 
 cassette hooks into your PHP application at the lowest level — intercepting database calls and outgoing HTTP requests via [uopz](https://www.php.net/manual/en/book.uopz.php) and serialises every return value to a JSON tape. On replay, the server runs normally but all external I/O is served from that tape, making each test completely self-contained: no database, no network, no side effects. Visual regression is layered on top via Playwright, which navigates through the recorded request sequence and compares screenshots against committed baselines.
@@ -103,10 +111,11 @@ Without it, cassette still records and replays all database calls — curl inter
 
 ## Configuration
 
-Create `.cassette/config.json` to customise screenshot behaviour per project:
+Create `.cassette/config.json` to customise recording and screenshot behaviour per project:
 
 ```json
 {
+    "ignoreUrls": ["/_mcp/", "/wp-cron.php"],
     "screenshot": {
         "headless": true,
         "zoom": 0.7,
@@ -120,6 +129,7 @@ Create `.cassette/config.json` to customise screenshot behaviour per project:
 
 | Key                            | Default | Description                                                                                                                                                                                          |
 | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ignoreUrls`                   | `[]`    | List of URI substrings — any HTTP request whose path contains one of these strings is silently skipped during recording (not written to `http.json`)                                                 |
 | `screenshot.headless`          | `true`  | Run Playwright in headless mode                                                                                                                                                                      |
 | `screenshot.zoom`              | `0.7`   | CSS zoom applied to `<html>` before each screenshot                                                                                                                                                  |
 | `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                                                                                                                                                         |

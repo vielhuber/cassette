@@ -3,6 +3,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -33,12 +34,31 @@ const timeout = screenshotConfig.timeout ?? 30000;
 // Extra wait after networkidle to give JS-rendered content (lazy-loaded tables etc.) time to paint.
 const waitAfterGoto = screenshotConfig.waitAfterGoto ?? 0;
 
+// Enable verbose debug logging via:  CASSETTE_DEBUG=1 npx playwright test ...
+const debug = !!process.env.CASSETTE_DEBUG;
+const dbg = (...args) => {
+    if (debug) console.log(...args);
+};
+
 if (!fs.existsSync(httpLogPath)) {
     throw new Error(`HTTP log not found: ${httpLogPath}. Run record mode first.`);
 }
 
+// Support gzip-compressed files (written by newer cassette versions) as well
+// as legacy plain-text files recorded before compression was added.
+const _httpRaw = fs.readFileSync(httpLogPath);
+let _httpJson;
+try {
+    _httpJson = zlib.gunzipSync(_httpRaw).toString('utf8');
+} catch (_) {
+    _httpJson = _httpRaw.toString('utf8');
+}
+
 /** @type {Array<{request: object, response: object}>} */
-const log = JSON.parse(fs.readFileSync(httpLogPath, 'utf8'));
+const ignoreUrls = cassetteConfig.ignoreUrls ?? [];
+const log = JSON.parse(_httpJson).filter(
+    (entry) => !ignoreUrls.some((pattern) => (entry.request?.uri ?? '').includes(pattern)),
+);
 
 // Reset the mock pointer before any browser request so the server starts
 // serving from bucket 0 — the same order as during the original recording.
@@ -93,22 +113,26 @@ test(cassetteName, async ({ page }) => {
     const firstReq = log[0]?.request ?? {};
     const defaultBaseUrl = firstReq.base_url ?? 'http://localhost';
 
-    // Debug logging — uncomment to trace pointer drift and network activity.
-    // page.on('request', (request) => {
-    //     const resourceType = request.resourceType();
-    //     const isNav = request.isNavigationRequest();
-    //     console.log(`[browser-request] ${request.method()} ${request.url()} | type=${resourceType} nav=${isNav}`);
-    // });
-    // page.on('response', async (response) => {
-    //     const status = response.status();
-    //     const url = response.url();
-    //     // Log only same-origin responses to avoid noise from CDN/static assets.
-    //     if (url.includes(defaultBaseUrl.replace(/^https?:\/\//, ''))) {
-    //         let body = '';
-    //         try { body = (await response.text()).substring(0, 120).replace(/\s+/g, ' '); } catch (_) {}
-    //         console.log(`[browser-response] ${status} ${url} | body_preview: ${body}`);
-    //     }
-    // });
+    // Debug logging — enable via CASSETTE_DEBUG=1.
+    if (debug) {
+        page.on('request', (request) => {
+            const resourceType = request.resourceType();
+            const isNav = request.isNavigationRequest();
+            console.log(`[browser-request] ${request.method()} ${request.url()} | type=${resourceType} nav=${isNav}`);
+        });
+        page.on('response', async (response) => {
+            const status = response.status();
+            const url = response.url();
+            // Log only same-origin responses to avoid noise from CDN/static assets.
+            if (url.includes(defaultBaseUrl.replace(/^https?:\/\//, ''))) {
+                let body = '';
+                try {
+                    body = (await response.text()).substring(0, 120).replace(/\s+/g, ' ');
+                } catch (_) {}
+                console.log(`[browser-response] ${status} ${url} | body_preview: ${body}`);
+            }
+        });
+    }
 
     // Pre-seed auth cookies so the very first request is already authenticated.
     const initialCookies = buildCookies(firstReq.cookies ?? {}, defaultBaseUrl);
@@ -154,18 +178,20 @@ test(cassetteName, async ({ page }) => {
             const selfResponse = entry.response;
             const selfHandler = async (route, request) => {
                 if (request.isNavigationRequest()) {
-                    // console.log(`[route] SELF NAV → continue  step=${index} url=${request.url()}`);
+                    dbg(`[route] SELF NAV → continue  step=${index} url=${request.url()}`);
                     await route.continue();
                 } else {
-                    // console.log(`[route] SELF SUB → fulfill   step=${index} url=${request.url()} status=${selfResponse.status ?? 200}`);
+                    dbg(
+                        `[route] SELF SUB → fulfill   step=${index} url=${request.url()} status=${selfResponse.status ?? 200}`,
+                    );
                     await route.fulfill({
                         status: selfResponse.status ?? 200,
                         headers: parseResponseHeaders(selfResponse.headers ?? []),
-                        body: selfResponse.body ?? ''
+                        body: selfResponse.body ?? '',
                     });
                 }
             };
-            // console.log(`[route] register SELF step=${index} url=${url}`);
+            dbg(`[route] register SELF step=${index} url=${url}`);
             await page.route(url, selfHandler);
             currentHandlers.push({ handlerUrl: url, handler: selfHandler });
             registeredUrls.add(url);
@@ -193,19 +219,21 @@ test(cassetteName, async ({ page }) => {
                 const handler = async (route, request) => {
                     const isNav = request.isNavigationRequest();
                     if (isNav) {
-                        // console.log(`[route] NAV → continue  step=${index} future=${futureIndex} url=${request.url()}`);
+                        dbg(`[route] NAV → continue  step=${index} future=${futureIndex} url=${request.url()}`);
                         await route.continue();
                         return;
                     }
-                    // console.log(`[route] SUB → fulfill   step=${index} future=${futureIndex} url=${request.url()} status=${recordedResponse.status ?? 200}`);
+                    dbg(
+                        `[route] SUB → fulfill   step=${index} future=${futureIndex} url=${request.url()} status=${recordedResponse.status ?? 200}`,
+                    );
                     await route.fulfill({
                         status: recordedResponse.status ?? 200,
                         headers: parseResponseHeaders(recordedResponse.headers ?? []),
-                        body: recordedResponse.body ?? ''
+                        body: recordedResponse.body ?? '',
                     });
                 };
 
-                // console.log(`[route] register step=${index} future=${futureIndex} url=${futureUrl}`);
+                dbg(`[route] register step=${index} future=${futureIndex} url=${futureUrl}`);
                 await page.route(futureUrl, handler);
                 currentHandlers.push({ handlerUrl: futureUrl, handler });
             }
@@ -214,11 +242,35 @@ test(cassetteName, async ({ page }) => {
             // They will be unrouted at the start of the next loop iteration.
             previousHandlers = currentHandlers;
 
-            // Pointer tracking — uncomment to verify pointer alignment.
-            // const pointerBefore = fs.existsSync(pointerPath)
-            //     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
-            //     : '(missing)';
-            // console.log(`\n[step ${index}] GET ${url} | pointer_before=${pointerBefore}`);
+            // Force the pointer to the expected index before each step.
+            // Background browser requests (timers, polling, delayed AJAX) can advance
+            // the pointer during the previous step's waitAfterGoto / screenshot phase.
+            // Resetting here ensures the server always reads the correct cassette bucket.
+            const pointerRaw =
+                debug && fs.existsSync(pointerPath)
+                    ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
+                    : null;
+            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: index }));
+            if (debug && pointerRaw !== null && pointerRaw !== index) {
+                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRaw}, reset to ${index})`);
+            }
+
+            // Non-HTML responses (JSON, plain-text etc.) are AJAX endpoints.
+            // Advance the pointer via a direct API request and skip the screenshot
+            // so the browser stays on the current page without navigating away.
+            if (!isHtmlResponse(entry)) {
+                console.log(`  #${index + 1}  GET   ${url}  (ajax – no screenshot)`);
+                await page.context().request.get(url);
+                if (debug) {
+                    const pointerAfterAjax = fs.existsSync(pointerPath)
+                        ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
+                        : '(missing)';
+                    dbg(`[step ${index}] ajax done | pointer_after=${pointerAfterAjax} | expected=${index + 1}`);
+                }
+                continue;
+            }
+
+            dbg(`\n[step ${index}] GET ${url} | pointer=${index} (forced)`);
 
             console.log(`  #${index + 1}  GET   ${url}`);
             await page.goto(url, { waitUntil: 'networkidle' });
@@ -226,30 +278,36 @@ test(cassetteName, async ({ page }) => {
                 await page.waitForTimeout(waitAfterGoto);
             }
 
-            // const pointerAfter = fs.existsSync(pointerPath)
-            //     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
-            //     : '(missing)';
-            // console.log(`[step ${index}] goto done | pointer_after=${pointerAfter} | expected_pointer_after=${index + 1}`);
-            // if (pointerAfter !== index + 1) {
-            //     console.warn(`[step ${index}] WARNING: pointer mismatch! got ${pointerAfter}, expected ${index + 1}`);
-            // }
+            if (debug) {
+                const pointerAfter = fs.existsSync(pointerPath)
+                    ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
+                    : '(missing)';
+                dbg(`[step ${index}] goto done | pointer_after=${pointerAfter} | expected_pointer_after=${index + 1}`);
+                if (pointerAfter !== index + 1) {
+                    console.warn(
+                        `[step ${index}] WARNING: pointer mismatch! got ${pointerAfter}, expected ${index + 1}`,
+                    );
+                }
+            }
 
             // Apply zoom and scrollbar fix via stylesheet.
-            await page.addStyleTag({ content: [
-                `html { zoom: ${zoom}; }`,
-                // Hide scrollbars completely so the viewport width stays constant
-                // regardless of content height — avoids the ±22px width oscillation
-                // that causes toHaveScreenshot() to see unstable layouts.
-                `html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }`,
-                `html, body { scrollbar-width: none; }`
-            ].join('\n') });
+            await page.addStyleTag({
+                content: [
+                    `html { zoom: ${zoom}; }`,
+                    // Hide scrollbars completely so the viewport width stays constant
+                    // regardless of content height — avoids the ±22px width oscillation
+                    // that causes toHaveScreenshot() to see unstable layouts.
+                    `html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }`,
+                    `html, body { scrollbar-width: none; }`,
+                ].join('\n'),
+            });
 
             // Apply maskSelectors via direct DOM manipulation so that position:fixed
             // elements are reliably hidden even in full-page screenshots.
             if (maskSelectors.length > 0) {
                 await page.evaluate((selectors) => {
                     for (const sel of selectors) {
-                        document.querySelectorAll(sel).forEach(el => {
+                        document.querySelectorAll(sel).forEach((el) => {
                             el.style.setProperty('visibility', 'hidden', 'important');
                         });
                     }
@@ -266,7 +324,7 @@ test(cassetteName, async ({ page }) => {
                     const PATTERN = /\b(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4}|\d{1,2}:\d{2}(?::\d{2})?|\d+[.,]\d+s)\b/g;
 
                     // Hide input[type="date"] value displays
-                    document.querySelectorAll('input[type="date"]').forEach(el => {
+                    document.querySelectorAll('input[type="date"]').forEach((el) => {
                         el.style.setProperty('visibility', 'hidden', 'important');
                     });
 
@@ -286,11 +344,14 @@ test(cassetteName, async ({ page }) => {
                         let match;
                         while ((match = PATTERN.exec(textNode.nodeValue)) !== null) {
                             if (match.index > lastIndex) {
-                                fragment.appendChild(document.createTextNode(textNode.nodeValue.slice(lastIndex, match.index)));
+                                fragment.appendChild(
+                                    document.createTextNode(textNode.nodeValue.slice(lastIndex, match.index)),
+                                );
                             }
                             const mask = document.createElement('span');
                             // Use a space-preserving invisible placeholder of similar width
-                            mask.style.cssText = 'visibility:hidden!important;display:inline-block!important;white-space:pre!important;';
+                            mask.style.cssText =
+                                'visibility:hidden!important;display:inline-block!important;white-space:pre!important;';
                             mask.textContent = match[0].replace(/./g, '\u2007'); // figure spaces
                             fragment.appendChild(mask);
                             lastIndex = match.index + match[0].length;
@@ -312,21 +373,37 @@ test(cassetteName, async ({ page }) => {
                 await expect(page).toHaveScreenshot(`step-${index + 1}.png`, {
                     fullPage: true,
                     maxDiffPixelRatio,
-                    timeout
+                    timeout,
                 });
             } catch (_e) {
+                const isTimeout = _e?.message?.includes('Timeout') || _e?.message?.includes('timeout');
+                const isDiff = _e?.message?.includes('snapshot') || _e?.message?.includes('differ');
+                if (isTimeout) {
+                    console.log(`  ✘  Timeout: screenshot did not stabilize within ${timeout}ms (step ${index + 1})`);
+                    console.log(`     Hint: increase "screenshot.timeout" in .cassette/config.json`);
+                    throw new Error('screenshot timeout');
+                }
                 const diffPath = path.join(runDir, 'screenshots', `step-${index + 1}-diff.png`);
                 console.log(`  ✘  Diff: ${diffPath}`);
                 throw new Error('screenshot diff');
             }
         } else {
-            // const pointerBefore = fs.existsSync(pointerPath)
-            //     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
-            //     : '(missing)';
-            // console.log(`\n[step ${index}] POST ${url} | pointer_before=${pointerBefore}`);
+            // Force the pointer to the expected index before each POST step.
+            const pointerRawPost =
+                debug && fs.existsSync(pointerPath)
+                    ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
+                    : null;
+            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: index }));
+            if (debug && pointerRawPost !== null && pointerRawPost !== index) {
+                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRawPost}, reset to ${index})`);
+            }
+            dbg(`\n[step ${index}] POST ${url} | pointer=${index} (forced)`);
 
             // POST: replay via the page context so the session cookie jar is shared.
             // No screenshot — the only purpose is to advance the server's mock pointer.
+            // maxRedirects: 0 prevents Playwright from following any 302 redirect that
+            // the server returns after a successful POST. The redirect target is already
+            // recorded as the next explicit GET step and will be handled there.
             console.log(`  #${index + 1}  POST  ${url}`);
             const isRawBody = (req.body ?? '') !== '';
             const body = isRawBody ? req.body : new URLSearchParams(req.post ?? {}).toString();
@@ -336,13 +413,18 @@ test(cassetteName, async ({ page }) => {
 
             await page.context().request.post(url, {
                 data: body,
-                headers: { 'Content-Type': contentType }
+                headers: { 'Content-Type': contentType },
+                maxRedirects: 0,
             });
 
-            // const pointerAfter = fs.existsSync(pointerPath)
-            //     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
-            //     : '(missing)';
-            // console.log(`[step ${index}] post done | pointer_after=${pointerAfter} | expected_pointer_after=${index + 1}`);
+            if (debug) {
+                const pointerAfterPost = fs.existsSync(pointerPath)
+                    ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
+                    : '(missing)';
+                dbg(
+                    `[step ${index}] post done | pointer_after=${pointerAfterPost} | expected_pointer_after=${index + 1}`,
+                );
+            }
         }
     }
 });
@@ -368,7 +450,7 @@ function buildCookies(cookies, baseUrl) {
         path: '/',
         httpOnly: false,
         secure: false,
-        sameSite: 'Lax'
+        sameSite: 'Lax',
     }));
 }
 
@@ -390,4 +472,18 @@ function parseResponseHeaders(headersList) {
         }
     }
     return headers;
+}
+
+/**
+ * Returns true when the recorded response is a full HTML page that should be
+ * screenshot-tested. Returns false for JSON, plain-text, or other non-HTML
+ * responses (AJAX endpoints that advance the pointer but need no visual diff).
+ *
+ * @param {{response: {headers?: string[]}}} entry
+ * @returns {boolean}
+ */
+function isHtmlResponse(entry) {
+    const ctHeader = (entry.response?.headers ?? []).find((h) => /^content-type:/i.test(h));
+    if (!ctHeader) return true; // assume HTML when Content-Type is absent
+    return /text\/html/i.test(ctHeader);
 }

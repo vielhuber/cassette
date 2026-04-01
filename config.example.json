@@ -1,8 +1,12 @@
 {
+    "ignoreUrls": ["/_mcp/", "/wp-cron.php"],
     "screenshot": {
         "headless": true,
         "zoom": 0.7,
         "maxDiffPixelRatio": 0.01,
-        "maskSelectors": []
+        "maskSelectors": [".footer__meta", ".toolbar"],
+        "maskDates": true,
+        "timeout": 60000,
+        "waitAfterGoto": 2000
     }
 }
