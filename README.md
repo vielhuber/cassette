@@ -4,7 +4,6 @@
 [![Last Commit](https://img.shields.io/github/last-commit/vielhuber/cassette)](https://github.com/vielhuber/cassette/commits)
 [![PHP Version Support](https://img.shields.io/packagist/php-v/vielhuber/cassette)](https://packagist.org/packages/vielhuber/cassette)
 [![Packagist Downloads](https://img.shields.io/packagist/dt/vielhuber/cassette)](https://packagist.org/packages/vielhuber/cassette)
-[![npm Downloads](https://img.shields.io/npm/dt/cassette)](https://www.npmjs.com/package/cassette)
 
 # 📼 cassette 📼
 
