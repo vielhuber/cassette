@@ -50,6 +50,51 @@ final class CassetteHttpRecorder
         }
 
         self::$logPath = rtrim($basePath, '/') . '/' . $cassetteName . '/http.json';
+
+        // On the very first browser request of a fresh recording session, show an
+        // interstitial page that clears all cookies and redirects to the site root.
+        // This ensures the recorded session starts from a clean, unauthenticated state.
+        $interstitialFlagPath = rtrim($basePath, '/') . '/' . $cassetteName . '/.started';
+        $isHtmlRequest = str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'text/html');
+        if ($isHtmlRequest && !file_exists($interstitialFlagPath)) {
+            $dir = dirname(self::$logPath);
+            if (!is_dir($dir)) {
+                mkdir($dir, 0775, true);
+            }
+            file_put_contents($interstitialFlagPath, '1');
+            $baseUrl = self::detectBaseUrl();
+
+            // Clear all cookies server-side so HttpOnly cookies (e.g. Laravel
+            // session) are expired — JS cannot reach HttpOnly cookies at all.
+            $host    = $_SERVER['HTTP_HOST'] ?? '';
+            $expired = 'Thu, 01 Jan 1970 00:00:00 GMT';
+            foreach (array_keys($_COOKIE) as $cookieName) {
+                $encoded = rawurlencode((string) $cookieName);
+                // Expire without domain (covers cookies set without explicit domain).
+                header("Set-Cookie: {$encoded}=; expires={$expired}; path=/; SameSite=Lax", false);
+                header("Set-Cookie: {$encoded}=; expires={$expired}; path=/; HttpOnly; SameSite=Lax", false);
+                // Expire with explicit domain (covers cookies set with domain=).
+                if ($host !== '') {
+                    header("Set-Cookie: {$encoded}=; expires={$expired}; path=/; domain={$host}; SameSite=Lax", false);
+                    header("Set-Cookie: {$encoded}=; expires={$expired}; path=/; domain={$host}; HttpOnly; SameSite=Lax", false);
+                }
+            }
+
+            header('Content-Type: text/html; charset=utf-8');
+            echo self::renderInterstitial($baseUrl);
+
+            // Prevent the shutdown handler from writing an empty bucket-0 so
+            // the first real browser request correctly lands at index 0.
+            Cassette::abort();
+
+            // uopz.exit=1 would suppress exit() — allow it explicitly so the
+            // interstitial page actually terminates without the app rendering behind it.
+            if (function_exists('uopz_allow_exit')) {
+                uopz_allow_exit(true);
+            }
+            exit;
+        }
+
         self::$requestSnapshot = self::captureRequest();
 
         // The callback fires with PHP_OUTPUT_HANDLER_FINAL when the outermost
@@ -157,6 +202,75 @@ final class CassetteHttpRecorder
             'cookies' => $_COOKIE,
             'headers' => $headers
         ];
+    }
+
+    /**
+     * Render the recording interstitial page.
+     *
+     * Clears all cookies via JavaScript and auto-redirects to the site root
+     * after 3 seconds so the recorded session starts from a clean state.
+     */
+    private static function renderInterstitial(string $baseUrl): string
+    {
+        $safeUrl = htmlspecialchars($baseUrl, ENT_QUOTES, 'UTF-8');
+        return <<<HTML
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Cassette — Recording</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body {
+                    background: #111;
+                    color: #ff3333;
+                    font-family: monospace;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    text-align: center;
+                }
+                h1 { font-size: 3rem; letter-spacing: 0.15em; }
+                p { color: #666; margin-top: 1.5rem; font-size: 1rem; }
+                span { color: #ff3333; }
+            </style>
+        </head>
+        <body>
+            <div>
+                <h1>⏺ RECORD STARTING.</h1>
+                <p>Clearing cookies&hellip; redirecting in <span id="t">3</span>s</p>
+            </div>
+            <script>
+                // Clear all cookies for this domain.
+                document.cookie.split(';').forEach(function (c) {
+                    var key = c.trim().split('=')[0];
+                    var domain = location.hostname;
+                    var paths = ['/', location.pathname];
+                    paths.forEach(function (path) {
+                        document.cookie = key + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=' + path;
+                        document.cookie = key + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=' + path + ';domain=' + domain;
+                        document.cookie = key + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=' + path + ';domain=.' + domain;
+                    });
+                });
+                // Clear localStorage and sessionStorage.
+                try { localStorage.clear(); } catch (e) {}
+                try { sessionStorage.clear(); } catch (e) {}
+                var remaining = 3;
+                var el = document.getElementById('t');
+                var interval = setInterval(function () {
+                    remaining--;
+                    el.textContent = remaining;
+                    if (remaining <= 0) {
+                        clearInterval(interval);
+                        window.location.href = '{$safeUrl}';
+                    }
+                }, 1000);
+            </script>
+        </body>
+        </html>
+        HTML;
     }
 
     /**

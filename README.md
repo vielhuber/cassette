@@ -20,7 +20,26 @@ composer require --dev vielhuber/cassette
 - PHP ≥ 8.3 with the [uopz](https://www.php.net/manual/en/book.uopz.php) extension
 - Node.js (for visual screenshot regression — installed automatically on first use)
 
-**Bootstrap** — add one line to your entry point (e.g. `wp-config.php`) before any application code runs:
+> **uopz should only be enabled temporarily** — disable it in production and re-enable it only when recording or replaying. All required settings are toggled via a single conf.d override file (`zzz-cassette.ini`):
+
+```bash
+PHP_VER=8.1  # adjust to your PHP version
+
+# enable (the sed line removes any legacy pool config entries from older installations)
+printf '[uopz]\nuopz.exit = 1\n[opcache]\nopcache.enable = 0\n[xdebug]\nxdebug.mode = off\n[blackfire]\nblackfire.apm_enabled = 0\n' | sudo tee /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini
+sudo phpenmod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
+
+# disable
+sudo rm -f /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini
+sudo phpdismod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
+```
+
+> - `uopz.exit = 1` — restores normal exit semantics (the default `0` silently suppresses all `exit()` / `die()` calls)
+> - `opcache.enable = 0` — avoids a [known uopz + opcache incompatibility](https://github.com/krakjoe/uopz/pull/132) that can corrupt interned strings (symptom: `preg_match_all(): Null byte in regex`)
+> - `xdebug.mode = off` — Xdebug and uopz both instrument bytecodes at the Zend engine level and conflict with each other; `xdebug.mode` is a `PHP_INI_SYSTEM` setting that cannot be overridden via `php_admin_value` in the pool config, so all settings live in `zzz-cassette.ini`; the `zzz-` prefix ensures the file sorts after any `custom.ini` in the same conf.d directory
+> - `blackfire.apm_enabled = 0` — Blackfire APM also instruments the Zend engine and can trigger the same null-byte corruption in combination with uopz
+
+**Bootstrap** — add one line to your entry point before any application code runs:
 
 ```php
 require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
@@ -28,19 +47,50 @@ require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
 
 The bootstrap is a no-op when no cassette is active, so it is always safe to keep this line in place.
 
+**Laravel** — add the line to `public/index.php`, right before the first `require` statement (i.e. before the autoloader):
+
+```php
+<?php
+
+// ...
+
+require_once __DIR__.'/../vendor/vielhuber/cassette/src/bootstrap.php';
+
+require __DIR__.'/../bootstrap/autoload.php'; // or vendor/autoload.php in newer Laravel versions
+```
+
+The path is `__DIR__.'/../vendor/...'` because `public/index.php` sits one level below the project root. `public/index.php` is the earliest possible hook point in Laravel — uopz overrides are in place before the autoloader, the service container, and any service providers are initialised.
+
+**Development tip** — when working on cassette itself alongside a project, point the `require_once` directly at the cassette source directory instead of the installed vendor copy. The bootstrap detects the project root via `SCRIPT_FILENAME`, so this works correctly even from a non-vendor path:
+
+```php
+// use live cassette source in dev, installed package everywhere else
+require_once file_exists('/var/www/cassette/src/bootstrap.php')
+    ? '/var/www/cassette/src/bootstrap.php'
+    : __DIR__.'/../vendor/vielhuber/cassette/src/bootstrap.php';
+```
+
+No file copying or symlinks needed. Changes to cassette's source take effect immediately on the next request.
+
+**WordPress** — add the line to `wp-config.php`, before `require_once ABSPATH . 'wp-settings.php';`:
+
+```php
+require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
+```
+
 `.cassette/config.json` is created automatically on the first `vendor/bin/cassette record` call.
 
 ## Usage
 
-| Command                                                                                                   | Description                                                                           |
-| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `vendor/bin/cassette record <name>`                                                                       | Switch to record mode and clear old data — then click through the flow in the browser |
-| `vendor/bin/cassette stop <name>`                                                                         | Stop recording — further requests are no longer captured                              |
-| `vendor/bin/cassette replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]`      | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
-| `vendor/bin/cassette accept <name>`                                                                       | Interactively accept HTTP diffs as new baseline                                       |
-| `vendor/bin/cassette delete <name>`                                                                       | Delete a run including all its data and screenshots                                   |
-| `vendor/bin/cassette delete --all`                                                                        | Delete all runs                                                                       |
-| `vendor/bin/cassette list`                                                                                | List all recorded runs with request count and screenshots                             |
+| Command                                                                                             | Description                                                                           |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `vendor/bin/cassette record <name>`                                                                 | Switch to record mode and clear old data — then click through the flow in the browser |
+| `vendor/bin/cassette stop <name>`                                                                   | Stop recording — further requests are no longer captured                              |
+| `vendor/bin/cassette replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]` | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
+| `vendor/bin/cassette accept <name>`                                                                 | Interactively accept HTTP diffs as new baseline                                       |
+| `vendor/bin/cassette delete <name>`                                                                 | Delete a run including all its data and screenshots                                   |
+| `vendor/bin/cassette delete --all`                                                                  | Delete all runs                                                                       |
+| `vendor/bin/cassette list`                                                                          | List all recorded runs with request count and screenshots                             |
 
 Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
@@ -114,24 +164,25 @@ Create `.cassette/config.json` to customise recording and screenshot behaviour p
 
 ```json
 {
-    "ignoreUrls": ["/_mcp/", "/wp-cron.php"],
+    "ignoreUrls": [],
     "screenshot": {
         "headless": true,
         "zoom": 0.7,
         "maxDiffPixelRatio": 0.01,
-        "maskSelectors": [".footer__meta"],
+        "maskSelectors": [],
         "maskDates": true,
-        "waitAfterGoto": 0
+        "timeout": 60000,
+        "waitAfterGoto": 2000
     }
 }
 ```
 
-| Key                            | Default | Description                                                                                                                                                                                          |
-| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ignoreUrls`                   | `[]`    | List of URI substrings — any HTTP request whose path contains one of these strings is silently skipped during recording (not written to `http.json`)                                                 |
-| `screenshot.headless`          | `true`  | Run Playwright in headless mode                                                                                                                                                                      |
-| `screenshot.zoom`              | `0.7`   | CSS zoom applied to `<html>` before each screenshot                                                                                                                                                  |
-| `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                                                                                                                                                         |
-| `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot (uses direct DOM manipulation, so `position: fixed` elements are reliably hidden)                                                      |
+| Key                            | Default | Description                                                                                                                                                                                         |
+| ------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ignoreUrls`                   | `[]`    | List of URI substrings — any HTTP request whose path contains one of these strings is silently skipped during recording (not written to `http.json`)                                                |
+| `screenshot.headless`          | `true`  | Run Playwright in headless mode                                                                                                                                                                     |
+| `screenshot.zoom`              | `0.7`   | CSS zoom applied to `<html>` before each screenshot                                                                                                                                                 |
+| `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                                                                                                                                                        |
+| `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot (uses direct DOM manipulation, so `position: fixed` elements are reliably hidden)                                                    |
 | `screenshot.maskDates`         | `true`  | Automatically hide all date and time values in the page (ISO dates `2026-03-29`, German dates `29.03.2026`, times `12:34` / `12:34:56`) including `<input type="date">` values and plain text nodes |
-| `screenshot.waitAfterGoto`     | `0`     | Extra milliseconds to wait after `networkidle` before taking the screenshot — useful when JS-rendered content (e.g. lazy-loaded tables) needs extra time to paint after the network goes idle        |
+| `screenshot.waitAfterGoto`     | `0`     | Extra milliseconds to wait after `networkidle` before taking the screenshot — useful when JS-rendered content (e.g. lazy-loaded tables) needs extra time to paint after the network goes idle       |

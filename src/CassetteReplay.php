@@ -91,9 +91,14 @@ file_put_contents($pointerPath, json_encode(['_request_index' => 0], JSON_PRETTY
 // pattern was added (or slipped through) are silently skipped during replay.
 $cassetteConfigPath = dirname($cassettesDir) . '/config.json';
 $ignoreUrls = [];
+$requestTimeoutSeconds = 30; // default
 if (is_file($cassetteConfigPath)) {
     $cassetteConfig = json_decode((string) file_get_contents($cassetteConfigPath), true) ?? [];
     $ignoreUrls = $cassetteConfig['ignoreUrls'] ?? [];
+    // screenshot.timeout is in ms; convert to seconds for curl.
+    if (isset($cassetteConfig['screenshot']['timeout'])) {
+        $requestTimeoutSeconds = (int) ceil($cassetteConfig['screenshot']['timeout'] / 1000);
+    }
 }
 
 // Filter out ignored entries before replaying so the pointer stays in sync.
@@ -126,6 +131,9 @@ mergeCookiesIntoJar(
     $cookieJar
 );
 
+// Track the last GET response body so CSRF tokens can be extracted for POST requests.
+$lastGetBody = '';
+
 foreach ($log as $index => $entry) {
     $request = $entry['request'];
     $recorded = $entry['response'];
@@ -137,14 +145,50 @@ foreach ($log as $index => $entry) {
     // mid-session (e.g. after a POST) are active for subsequent requests.
     mergeCookiesIntoJar($request['cookies'] ?? [], parse_url($baseUrl, PHP_URL_HOST) ?? 'localhost', $cookieJar);
 
+    // For POST requests that include a Laravel CSRF token, extract the fresh
+    // _token from the last GET response and inject it into the POST data.
+    // This prevents HTTP 419 (Page Expired) caused by replaying a stale token.
+    if ($request['method'] === 'POST' && isset($request['post']['_token']) && $lastGetBody !== '') {
+        if (
+            preg_match('/<input[^>]+name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']/', $lastGetBody, $m) ||
+            preg_match('/<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']_token["\']/', $lastGetBody, $m)
+        ) {
+            $freshToken = $m[1];
+            // Update both the parsed post array and the raw URL-encoded body,
+            // since executeRequest() sends whichever is non-empty first.
+            $request['post']['_token'] = $freshToken;
+            if (($request['body'] ?? '') !== '') {
+                $request['body'] = preg_replace(
+                    '/(?<=^|&)_token=[^&]*/',
+                    '_token=' . urlencode($freshToken),
+                    $request['body']
+                ) ?? $request['body'];
+            }
+        }
+    }
+
     $fullUrl = $baseUrl . $request['uri'];
     $displayUrl = mb_strlen($fullUrl) > 100 ? mb_substr($fullUrl, 0, 100) . '…' : $fullUrl;
     $label = sprintf('#%d  %-4s  %s', $index + 1, $request['method'], $displayUrl);
 
-    [$actualStatus, $actualBody] = executeRequest($request, $baseUrl, $cookieJar);
+    [$actualStatus, $actualBody, $curlError] = executeRequest($request, $baseUrl, $cookieJar, $requestTimeoutSeconds);
+
+    if ($request['method'] === 'GET') {
+        $lastGetBody = $actualBody;
+    }
+
+    // Skip body diff for entries recorded with an empty body — the recording
+    // did not capture a response (e.g. streamed/binary output). The request
+    // is still sent to advance the mock pointer correctly.
+    $recordedBody = (string) ($recorded['body'] ?? '');
+    if ($recordedBody === '') {
+        echo colorize("\033[33mSKIP\033[0m") . "  $label  (empty recorded body)\n";
+        $passed++;
+        continue;
+    }
 
     $statusOk = $actualStatus === (int) ($recorded['status'] ?? 200);
-    $bodyOk = normalizeBody($actualBody) === normalizeBody((string) ($recorded['body'] ?? ''));
+    $bodyOk = normalizeBody($actualBody) === normalizeBody($recordedBody);
 
     if ($statusOk && $bodyOk) {
         echo colorize("\033[32mPASS\033[0m") . "  $label\n";
@@ -159,10 +203,13 @@ foreach ($log as $index => $entry) {
 
     if (!$statusOk) {
         $diffLines[] = "Status: expected {$recorded['status']}, got $actualStatus";
+        if ($actualStatus === 0 && $curlError !== '') {
+            $diffLines[] = "curl error: $curlError";
+        }
     }
 
     if (!$bodyOk) {
-        $diff = computeDiff(normalizeBody((string) ($recorded['body'] ?? '')), normalizeBody($actualBody));
+        $diff = computeDiff(normalizeBody($recordedBody), normalizeBody($actualBody));
         $diffLines = array_merge($diffLines, $diff);
     }
 
@@ -269,7 +316,7 @@ function mergeCookiesIntoJar(array $cookies, string $host, string $jarPath): voi
  * @param  string $cookieJar Path to a Netscape cookie jar file for session persistence.
  * @return array{int, string}
  */
-function executeRequest(array $request, string $baseUrl, string $cookieJar): array
+function executeRequest(array $request, string $baseUrl, string $cookieJar, int $timeoutSeconds = 30): array
 {
     $ch = curl_init($baseUrl . $request['uri']);
 
@@ -279,7 +326,7 @@ function executeRequest(array $request, string $baseUrl, string $cookieJar): arr
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_COOKIEJAR => $cookieJar,
         CURLOPT_COOKIEFILE => $cookieJar,
-        CURLOPT_TIMEOUT => 30,
+        CURLOPT_TIMEOUT => $timeoutSeconds,
         CURLOPT_SSL_VERIFYPEER => false
     ]);
 
@@ -325,8 +372,9 @@ function executeRequest(array $request, string $baseUrl, string $cookieJar): arr
 
     $body = (string) curl_exec($ch);
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
 
-    return [$status, $body];
+    return [$status, $body, $curlError];
 }
 
 /**
@@ -342,6 +390,10 @@ function normalizeBody(string $body): string
     $body = preg_replace('/value="[0-9a-f]{10}"/', 'value="__NONCE__"', $body) ?? $body;
     $body = preg_replace('/"nonce"\s*:\s*"[0-9a-f]{10}"/', '"nonce":"__NONCE__"', $body) ?? $body;
     $body = preg_replace('/_wpnonce=[0-9a-f]{10}/', '_wpnonce=__NONCE__', $body) ?? $body;
+
+    // Laravel CSRF token (40-char random string in hidden input named "_token").
+    $body = preg_replace('/(<input[^>]+name=["\']_token["\'][^>]+value=["\'])[^"\']*(["\'])/', '$1__TOKEN__$2', $body) ?? $body;
+    $body = preg_replace('/(<input[^>]+value=["\'])[^"\']*(["\'][^>]+name=["\']_token["\'])/', '$1__TOKEN__$2', $body) ?? $body;
 
     // ISO 8601 / SQL timestamps — with or without seconds
     // (2026-03-24T17:10:41, 2026-03-24 17:10:41, 2026-03-31T11:10).
@@ -362,8 +414,17 @@ function normalizeBody(string $body): string
     // Random cache-buster query params on static file URLs (e.g. ?rand=132 or &rand=132 or &amp;rand=132).
     $body = preg_replace('/(?:\?|&amp;|&)rand=\d+/', '&rand=__RAND__', $body) ?? $body;
 
+    // Google Maps embed URL: cache-buster timestamp in the "4v" parameter (e.g. !4v1775890090000).
+    $body = preg_replace('/!4v\d{13}/', '!4v__MAPS_TS__', $body) ?? $body;
+
     // Page render timing in footer (e.g. | 6,25s | or | 0.52s |).
     $body = preg_replace('/\|\s*[\d,.]+s\s*\|/', '| __TIME__ |', $body) ?? $body;
+
+    // Generic duration values (e.g. "0.464s" in metainfo spans).
+    $body = preg_replace('/\b\d+[.,]\d+s\b/', '__DURATION__', $body) ?? $body;
+
+    // Uptime / runtime values in hours (e.g. "214,23h").
+    $body = preg_replace('/\b\d+[.,]\d+h\b/', '__UPTIME__', $body) ?? $body;
 
     // <input type="date"> values change daily (e.g. default = today).
     // Normalise value="YYYY-MM-DD" in any date input regardless of other attributes.

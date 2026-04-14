@@ -98,6 +98,7 @@ switch ($command) {
             $cassettesDir . '/' . $name . '/data.json',
             $cassettesDir . '/' . $name . '/data.pointer',
             $cassettesDir . '/' . $name . '/http.json',
+            $cassettesDir . '/' . $name . '/.started',
         ];
 
         foreach ($toDelete as $path) {
@@ -112,8 +113,29 @@ switch ($command) {
         file_put_contents($configPath, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
 
         echo "\033[33m● Recording started\033[0m  cassette: \033[1m$name\033[0m\n";
-        echo "\n  Click through your flow in the browser, then run:\n";
-        echo "  \033[36mvendor/bin/cassette stop $name\033[0m\n";
+        echo "\n  \033[1mOpen your browser at\033[0m \033[36m/\033[0m and start recording.\n";
+        echo "\n  Press \033[1mc\033[0m to stop recording.\n";
+
+        // Switch terminal to single-char (cbreak) mode so 'c' is read without Enter.
+        // Register a shutdown function to restore the terminal even on Ctrl+C / SIGINT.
+        register_shutdown_function(static function (): void {
+            exec('stty sane 2>/dev/null');
+        });
+        exec('stty cbreak -echo 2>/dev/null');
+        while (true) {
+            $char = fread(STDIN, 1);
+            if ($char === 'c' || $char === 'C') {
+                break;
+            }
+        }
+        exec('stty sane 2>/dev/null');
+        echo "\n";
+
+        // Auto-stop: deactivate recording.
+        clearState($configPath);
+        echo "\033[32m✅ Recording stopped\033[0m  cassette: \033[1m$name\033[0m\n";
+        echo "\n  Run when ready:\n";
+        echo "  \033[36mvendor/bin/cassette replay $name\033[0m\n";
         break;
 
     case 'stop':
@@ -157,6 +179,11 @@ switch ($command) {
             }
         }
 
+        // Open a log file for the complete replay output so past runs can be inspected.
+        $replayLogPath = $cassettesDir . '/' . $name . '/replay.log';
+        $replayLogFh   = fopen($replayLogPath, 'a');
+        fwrite($replayLogFh, date('[Y-m-d H:i:s] ') . implode(' ', array_slice($argv, 1)) . "\n\n");
+
         // --- Step 1: HTTP body diff ---
         $config['mode'] = 'mock';
         $config['name'] = $name;
@@ -172,10 +199,10 @@ switch ($command) {
         $httpExitCode = 0;
 
         if (!$screenshotOnly) {
-            echo "\033[1m── HTTP replay ─────────────────────────────────────────\033[0m\n";
+            replayEcho($replayLogFh, "\033[1m── HTTP replay ─────────────────────────────────────────\033[0m\n");
             $replayScript = __DIR__ . '/src/CassetteReplay.php';
             $replayArgs   = escapeshellarg($name) . ($baseUrl !== null ? ' ' . escapeshellarg($baseUrl) : '');
-            passthru('CASSETTE_ROOT=' . escapeshellarg($projectRoot) . " php $replayScript $replayArgs", $httpExitCode);
+            passthruLogged('CASSETTE_ROOT=' . escapeshellarg($projectRoot) . " php $replayScript $replayArgs", $httpExitCode, $replayLogFh);
 
             if ($httpExitCode !== 0) {
                 $remaining   = interactiveAcceptDiffs(
@@ -192,25 +219,27 @@ switch ($command) {
         if ($httpOnly) {
             $allPassed = ($httpExitCode === 0);
             clearState($configPath);
-            echo "\n" . str_repeat('─', 56) . "\n";
+            replayEcho($replayLogFh, "\n" . str_repeat('─', 56) . "\n");
             if ($allPassed) {
-                echo "\033[32m✅ All checks passed\033[0m\n";
+                replayEcho($replayLogFh, "\033[32m✅ All checks passed\033[0m\n");
             } else {
-                echo "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n";
-                echo "  Diff files: .cassette/runs/$name/http/*.diff\n";
+                replayEcho($replayLogFh, "\033[31m⛔ Checks failed [HTTP diff]\033[0m\n");
+                replayEcho($replayLogFh, "  Diff files: .cassette/runs/$name/http/*.diff\n");
             }
+            fclose($replayLogFh);
             exit($allPassed ? 0 : 1);
         }
 
-        echo "\n\033[1m── Screenshot replay ───────────────────────────────────\033[0m\n";
+        replayEcho($replayLogFh, "\n\033[1m── Screenshot replay ───────────────────────────────────\033[0m\n");
 
         // Auto-install Node.js dependencies on first use.
         if (!is_dir(__DIR__ . '/node_modules')) {
-            echo "  Installing Node.js dependencies...\n";
-            passthru('cd ' . escapeshellarg(__DIR__) . ' && npm install --silent', $npmExit);
+            replayEcho($replayLogFh, "  Installing Node.js dependencies...\n");
+            passthruLogged('cd ' . escapeshellarg(__DIR__) . ' && npm install --silent', $npmExit, $replayLogFh);
 
             if ($npmExit !== 0) {
                 fwrite(STDERR, "\033[31m⛔ npm install failed. Cannot run Playwright tests.\033[0m\n");
+                fclose($replayLogFh);
                 exit(1);
             }
         }
@@ -219,11 +248,12 @@ switch ($command) {
         $chromiumMarker = __DIR__ . '/node_modules/.playwright-browsers-installed';
 
         if (!file_exists($chromiumMarker)) {
-            echo "  Installing Playwright browser...\n";
-            passthru('cd ' . escapeshellarg(__DIR__) . ' && npx playwright install chromium', $pwExit);
+            replayEcho($replayLogFh, "  Installing Playwright browser...\n");
+            passthruLogged('cd ' . escapeshellarg(__DIR__) . ' && npx playwright install chromium', $pwExit, $replayLogFh);
 
             if ($pwExit !== 0) {
                 fwrite(STDERR, "\033[31m⛔ Playwright browser install failed.\033[0m\n");
+                fclose($replayLogFh);
                 exit(1);
             }
 
@@ -256,26 +286,29 @@ switch ($command) {
             $env .= ' CASSETTE_DEBUG=1';
         }
 
-        passthru(
+        passthruLogged(
             'cd ' . escapeshellarg(__DIR__) . " && $env npx playwright test --config=$configFile$updateFlag",
-            $screenshotExitCode
+            $screenshotExitCode,
+            $replayLogFh
         );
 
         $allPassed = ($httpExitCode === 0 && $screenshotExitCode === 0);
         clearState($configPath);
-        echo "\n" . str_repeat('─', 56) . "\n";
+        replayEcho($replayLogFh, "\n" . str_repeat('─', 56) . "\n");
 
         if ($allPassed) {
-            echo "\033[32m✅ All checks passed\033[0m\n";
+            replayEcho($replayLogFh, "\033[32m✅ All checks passed\033[0m\n");
         } else {
-            echo "\033[31m⛔ Checks failed\033[0m";
-            if ($httpExitCode !== 0)        { echo " [HTTP diff]"; }
-            if ($screenshotExitCode !== 0)  { echo " [Screenshots]"; }
-            echo "\n";
+            replayEcho($replayLogFh, "\033[31m⛔ Checks failed\033[0m");
+            if ($httpExitCode !== 0)        { replayEcho($replayLogFh, " [HTTP diff]"); }
+            if ($screenshotExitCode !== 0)  { replayEcho($replayLogFh, " [Screenshots]"); }
+            replayEcho($replayLogFh, "\n");
             if ($httpExitCode !== 0) {
-                echo "  Diff files: .cassette/runs/$name/http/*.diff\n";
+                replayEcho($replayLogFh, "  Diff files: .cassette/runs/$name/http/*.diff\n");
             }
         }
+
+        fclose($replayLogFh);
 
         exit($allPassed ? 0 : 1);
 
@@ -401,6 +434,73 @@ switch ($command) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Write to both stdout and the replay log file simultaneously.
+ *
+ * @param resource $logFh
+ */
+function replayEcho($logFh, string $text): void
+{
+    echo $text;
+    fwrite($logFh, $text);
+}
+
+/**
+ * Run a shell command, stream its stdout to both the terminal and the log file
+ * in real time, and capture its exit code.
+ *
+ * Uses proc_open + stream_select to avoid blocking on either stdout or stderr.
+ *
+ * @param resource $logFh
+ */
+function passthruLogged(string $cmd, int &$exitCode, $logFh): void
+{
+    $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    if ($proc === false) {
+        $exitCode = 1;
+        return;
+    }
+
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+
+    while (true) {
+        $read = array_filter([$pipes[1], $pipes[2]], static fn($p): bool => is_resource($p) && !feof($p));
+        if (empty($read)) {
+            break;
+        }
+        $write   = null;
+        $except  = null;
+        if (stream_select($read, $write, $except, 1) === false) {
+            break;
+        }
+        foreach ($read as $stream) {
+            $chunk = fread($stream, 8192);
+            if ($chunk === false || $chunk === '') {
+                continue;
+            }
+            if ($stream === $pipes[1]) {
+                // stdout: show on terminal and write to log.
+                echo $chunk;
+                flush();
+                fwrite($logFh, $chunk);
+            } else {
+                // stderr: show on terminal only (avoids polluting the log with
+                // Playwright's internal noise, but still visible to the user).
+                fwrite(STDERR, $chunk);
+            }
+        }
+    }
+
+    foreach ($pipes as $pipe) {
+        if (is_resource($pipe)) {
+            fclose($pipe);
+        }
+    }
+
+    $exitCode = proc_close($proc);
+}
 
 /**
  * Delete the state file — absence of state.json means 'stopped'.

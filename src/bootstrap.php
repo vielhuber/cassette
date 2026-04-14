@@ -111,6 +111,22 @@ require_once __DIR__ . '/Cassette.php';
 
 Cassette::load(name: $cassetteName, mode: $cassetteMode, basePath: $cassetteSiteRoot . '/.cassette/runs');
 
+// Log the shutdown mode for diagnostics. The actual save()/savePointer()
+// call is deferred to a second handler (see below) which fires *after*
+// CassetteHttpRecorder has finished capturing the response.
+register_shutdown_function(static function (): void {
+    Cassette::log("shutdown: mode='" . Cassette::getMode() . "'");
+});
+
+// Load project config (.cassette/config.json) and share it with Cassette
+// so CassetteHooks.php can read the "hooks" configuration.
+$cassetteProjectConfig = [];
+$cassetteConfigFile    = $cassetteSiteRoot . '/.cassette/config.json';
+if (is_file($cassetteConfigFile)) {
+    $cassetteProjectConfig = json_decode((string) file_get_contents($cassetteConfigFile), true) ?? [];
+}
+Cassette::setConfig($cassetteProjectConfig);
+
 // Install all uopz hooks (hooks read Cassette::getMode() at call time).
 require_once __DIR__ . '/CassetteHooks.php';
 
@@ -120,10 +136,16 @@ require_once __DIR__ . '/CassetteHttpRecorder.php';
 
 CassetteHttpRecorder::start(cassetteName: $cassetteName, mode: $cassetteMode, basePath: $cassetteSiteRoot . '/.cassette/runs');
 
-// Auto-save the tape when the PHP process exits (record mode only).
-// Persist the replay pointer after each mock request so the next request
-// in the sequence continues exactly where this one left off.
+// Ensure save/pointer also runs after CassetteHttpRecorder has completed its
+// shutdown work. PHP calls shutdown functions in FIFO order, so this second
+// handler (registered after CassetteHttpRecorder::start()) fires after the
+// recorder — guaranteeing any intercepted calls made by the recorder are
+// captured before the bucket is written to disk.
 register_shutdown_function(static function (): void {
-    Cassette::save();
-    Cassette::savePointer();
+    $mode = Cassette::getMode();
+    if ($mode === Cassette::MODE_RECORD) {
+        Cassette::save();
+    } elseif ($mode === Cassette::MODE_MOCK) {
+        Cassette::savePointer();
+    }
 });

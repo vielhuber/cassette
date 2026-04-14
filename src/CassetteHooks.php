@@ -2,163 +2,285 @@
 declare(strict_types=1);
 
 /**
- * uopz-based hooks for all intercepted external calls.
+ * uopz hooks for all intercepted external calls.
  *
- * Each hook checks Cassette::getMode():
- *   record → call real function, log result via Cassette::record()
- *   mock   → skip real function, return Cassette::mock()
+ * Built-in hook profiles are installed automatically whenever the target
+ * function or class is available at runtime. No manual configuration is
+ * required.
  *
- * This file must be included AFTER Cassette.php and BEFORE application code runs.
- * No production code is modified.
+ * Project-specific additional hooks can be declared in .cassette/config.json:
  *
- * --- Why no uopz_unset_return + reinstall for record mode ---------------
+ *   "hooks": {
+ *     "functions":        ["my_global_fn"],
+ *     "static_methods":   {"My\\Namespace\\ClassName": ["method"]},
+ *     "instance_methods": {"My\\Namespace\\ClassName": ["method"]}
+ *   }
+ *
+ * Built-in profiles (auto-discovered):
+ *   functions        → db_fetch_var, db_fetch_row, db_fetch_col, db_fetch_all,
+ *                      db_query, db_insert, db_update, db_delete, db_count,
+ *                      db_last_insert_id
+ *   static_methods   → vielhuber\stringhelper\__::curl
+ *   instance_methods → Illuminate\Database\Connection:
+ *                        select, insert, update, delete,
+ *                        statement, affectingStatement
+ *
+ * Cassette key format in data.json:
+ *   functions        → function name ("db_fetch_row")
+ *   static_methods   → "ShortClass::method"   ("__::curl")
+ *   instance_methods → "ShortClass::method"   ("Connection::select")
+ *
+ * --- Why reinstall happens in a destructor, not inside the hook ---------
  *
  * uopz_set_return() silently fails when called from inside a running hook
- * closure. The "unset → call real → reinstall" pattern therefore only records
- * the FIRST call; every subsequent call bypasses the hook.
- *
- * Fixes per hook type:
- *
- *   db_*         → In record mode, call $db->method() directly instead of the
- *                  global wrapper function. No reinstall needed at all.
- *
- *   __::curl()   → CassetteCurlRehook object: its __destruct() reinstalls the
- *                  hook AFTER the closure has returned and its local scope has
- *                  been cleaned up — outside uopz's hook execution context,
- *                  where uopz_set_return() works normally again.
+ * closure. CassetteRehook::__destruct() fires after the closure returns and
+ * its local scope is cleaned up — outside uopz's hook execution context —
+ * where uopz_set_return() works correctly again.
  */
 
-// Guard: uopz must be loaded.
 if (!extension_loaded('uopz')) {
     throw new \RuntimeException(
-        'uopz PHP extension is required for cassette hooks. ' . 'Install via: pecl install uopz'
+        'uopz PHP extension is required for cassette hooks. Install via: pecl install uopz'
     );
 }
 
 // -----------------------------------------------------------------------
-// __::curl() — static method hook (optional: only installed when vielhuber/stringhelper is available)
+// Built-in hook profiles
 // -----------------------------------------------------------------------
 
-if (!class_exists('vielhuber\stringhelper\__', true)) {
-    // vielhuber/stringhelper is not loaded — curl interception is skipped.
-    // Add "vielhuber/stringhelper" to your project's composer.json to enable it.
-    return;
-}
+/** @var list<string> */
+$cassetteBuiltinFunctions = [
+    'db_fetch_var',
+    'db_fetch_row',
+    'db_fetch_col',
+    'db_fetch_all',
+    'db_query',
+    'db_insert',
+    'db_update',
+    'db_delete',
+    'db_count',
+    'db_last_insert_id',
+];
+
+/** @var array<string, list<string>> */
+$cassetteBuiltinStaticMethods = [
+    'vielhuber\stringhelper\__' => ['curl'],
+];
+
+/** @var array<string, list<string>> */
+$cassetteBuiltinInstanceMethods = [
+    'Illuminate\Database\Connection' => [
+        'select',
+        'insert',
+        'update',
+        'delete',
+        'statement',
+        'affectingStatement',
+    ],
+];
+
+// -----------------------------------------------------------------------
+// Generic rehook helper
+// -----------------------------------------------------------------------
 
 /**
- * Reinstalls the __::curl() hook via its destructor.
+ * Reinstalls any cassette hook via its destructor.
  *
- * When an instance of this class goes out of scope (i.e. when the record-mode
- * closure returns and its local variables are cleaned up), __destruct() fires
- * from outside the uopz hook execution context, making uopz_set_return() work
- * correctly again for all subsequent curl calls.
+ * Store an instance as a local variable inside a record-mode hook closure.
+ * When the closure returns and PHP destroys the local variable, __destruct()
+ * fires from outside the uopz hook execution context, making uopz_set_return()
+ * work correctly again.
  */
-final class CassetteCurlRehook
+final class CassetteRehook
 {
+    public function __construct(private readonly \Closure $reinstaller) {}
+
     public function __destruct()
     {
-        registerCurlHook();
+        ($this->reinstaller)();
     }
 }
 
+// -----------------------------------------------------------------------
+// Hook installer functions
+// -----------------------------------------------------------------------
+
 /**
- * Register (or re-register) the uopz hook for __::curl().
+ * Install a uopz hook for a global PHP function.
+ * Skipped silently when the function does not exist.
  */
-function registerCurlHook(): void
+function installFunctionHook(string $fn): void
 {
+    if (!function_exists($fn)) {
+        return;
+    }
+
     uopz_set_return(
-        'vielhuber\stringhelper\__',
-        'curl',
-        static function () {
+        $fn,
+        static function () use ($fn) {
             $args = func_get_args();
             $mode = Cassette::getMode();
 
             if ($mode === Cassette::MODE_MOCK) {
-                return Cassette::mock('__::curl', $args);
+                return Cassette::mock($fn, $args);
             }
 
             if ($mode === Cassette::MODE_RECORD) {
-                // CassetteCurlRehook destructor reinstalls the hook after this
-                // closure returns — when we are no longer inside uopz's hook context.
-                $rehook = new CassetteCurlRehook();
-                uopz_unset_return('vielhuber\stringhelper\__', 'curl');
-                $result = \vielhuber\stringhelper\__::curl(...$args);
-                Cassette::record('__::curl', $args, $result);
+                $rehook = new CassetteRehook(static fn() => installFunctionHook($fn));
+                uopz_unset_return($fn);
+                $result = $fn(...$args);
+                // force fresh non-interned string allocations to avoid uopz interned-string-pool corruption
+                $result = unserialize(serialize($result));
+                Cassette::record($fn, $args, $result);
                 return $result;
-                // $rehook destructs here → registerCurlHook() called
+                // $rehook destructs here → reinstalls hook
             }
 
-            // Hooks are only installed when cassette is active.
-            throw new \LogicException('Cassette __::curl hook fired without active cassette mode.');
+            throw new \LogicException("Cassette $fn hook fired without active cassette mode.");
         },
         true
     );
 }
 
-registerCurlHook();
-
-// -----------------------------------------------------------------------
-// db_* global function hooks
-// -----------------------------------------------------------------------
-
 /**
- * Register hooks for all global db_* functions.
- */
-(static function (): void {
-    $functions = [
-        'db_fetch_var',
-        'db_fetch_row',
-        'db_fetch_col',
-        'db_fetch_all',
-        'db_query',
-        'db_insert',
-        'db_update',
-        'db_delete',
-        'db_count',
-        'db_last_insert_id'
-    ];
-
-    foreach ($functions as $function) {
-        installDbHook($function);
-    }
-})();
-
-/**
- * Install a uopz hook for a single global db_* function.
+ * Install a uopz hook for a static class method.
+ * Skipped silently when the class does not exist.
  *
- * In record mode, $db->method() is called directly instead of the hooked
- * global wrapper. This sidesteps the "reinstall inside hook closure" problem
- * entirely — the hook stays installed and intercepts every call.
- *
- * @param string $functionName e.g. "db_fetch_row"
+ * Cassette key: "ShortClassName::method".
  */
-function installDbHook(string $functionName): void
+function installStaticMethodHook(string $class, string $method): void
 {
+    if (!class_exists($class, true) || !method_exists($class, $method)) {
+        return;
+    }
+
+    $key = (new \ReflectionClass($class))->getShortName() . '::' . $method;
+
     uopz_set_return(
-        $functionName,
-        static function () use ($functionName) {
+        $class,
+        $method,
+        static function () use ($class, $method, $key) {
             $args = func_get_args();
             $mode = Cassette::getMode();
 
             if ($mode === Cassette::MODE_MOCK) {
-                return Cassette::mock($functionName, $args);
+                return Cassette::mock($key, $args);
             }
 
             if ($mode === Cassette::MODE_RECORD) {
-                // Call the underlying dbhelper method directly.
-                // e.g. db_fetch_row → $db->fetch_row()
-                // This avoids calling the hooked global function and therefore
-                // requires no uopz_unset_return / reinstall juggling.
-                global $db;
-                $method = substr($functionName, 3); // strip leading "db_"
-                $result = $db->$method(...$args);
-                Cassette::record($functionName, $args, $result);
+                $rehook = new CassetteRehook(static fn() => installStaticMethodHook($class, $method));
+                uopz_unset_return($class, $method);
+                $result = $class::$method(...$args);
+                // force fresh non-interned string allocations to avoid uopz interned-string-pool corruption
+                $result = unserialize(serialize($result));
+                Cassette::record($key, $args, $result);
                 return $result;
             }
 
-            // Hooks are only installed when cassette is active.
-            throw new \LogicException("Cassette $functionName hook fired without active cassette mode.");
+            throw new \LogicException("Cassette $key hook fired without active cassette mode.");
         },
         true
     );
 }
+
+/**
+ * Install a uopz hook for an instance method.
+ * Skipped silently when the class does not exist.
+ *
+ * The closure executes in the instance's scope (execute=true), so $this
+ * refers to the actual object whose method was intercepted.
+ *
+ * Cassette key: "ShortClassName::method".
+ */
+function installInstanceMethodHook(string $class, string $method): void
+{
+    if (!class_exists($class, true)) {
+        Cassette::log("SKIP instance hook $class::$method — class not found");
+        return;
+    }
+    if (!method_exists($class, $method)) {
+        Cassette::log("SKIP instance hook $class::$method — method not found");
+        return;
+    }
+    Cassette::log("INSTALL instance hook $class::$method");
+
+    $key = (new \ReflectionClass($class))->getShortName() . '::' . $method;
+
+    uopz_set_return(
+        $class,
+        $method,
+        function () use ($class, $method, $key) {
+            $args = func_get_args();
+            $mode = Cassette::getMode();
+
+            if ($mode === Cassette::MODE_MOCK) {
+                return Cassette::mock($key, $args);
+            }
+
+            if ($mode === Cassette::MODE_RECORD) {
+                Cassette::log("HOOK FIRED record: $key args=" . json_encode(array_slice($args, 0, 1)));
+                $that   = $this;
+                $rehook = new CassetteRehook(static fn() => installInstanceMethodHook($class, $method));
+                uopz_unset_return($class, $method);
+                $result = $that->$method(...$args);
+                // force fresh non-interned string allocations to avoid uopz interned-string-pool
+                // corruption: PDO property names are stored as (or reference) corrupted interned
+                // strings; unserialize/serialize creates clean heap-allocated copies outside the pool.
+                $result = unserialize(serialize($result));
+                Cassette::record($key, $args, $result);
+                return $result;
+            }
+
+            Cassette::log("HOOK FIRED but mode empty/unknown: '$mode' for $key");
+            throw new \LogicException("Cassette $key hook fired without active cassette mode.");
+        },
+        true
+    );
+}
+
+// -----------------------------------------------------------------------
+// Install: built-in profiles + optional project-specific additions
+// -----------------------------------------------------------------------
+
+$cassetteExtraConfig = Cassette::getConfig()['hooks'] ?? [];
+
+$cassetteAllFunctions = array_unique(array_merge(
+    $cassetteBuiltinFunctions,
+    (array) ($cassetteExtraConfig['functions'] ?? [])
+));
+
+$cassetteAllStaticMethods = array_merge_recursive(
+    $cassetteBuiltinStaticMethods,
+    (array) ($cassetteExtraConfig['static_methods'] ?? [])
+);
+// Deduplicate per-class method lists to prevent double hook installation.
+foreach ($cassetteAllStaticMethods as $class => $methods) {
+    $cassetteAllStaticMethods[$class] = array_values(array_unique((array) $methods));
+}
+
+$cassetteAllInstanceMethods = array_merge_recursive(
+    $cassetteBuiltinInstanceMethods,
+    (array) ($cassetteExtraConfig['instance_methods'] ?? [])
+);
+foreach ($cassetteAllInstanceMethods as $class => $methods) {
+    $cassetteAllInstanceMethods[$class] = array_values(array_unique((array) $methods));
+}
+
+foreach ($cassetteAllFunctions as $fn) {
+    installFunctionHook((string) $fn);
+}
+
+foreach ($cassetteAllStaticMethods as $class => $methods) {
+    foreach ((array) $methods as $method) {
+        installStaticMethodHook((string) $class, (string) $method);
+    }
+}
+
+foreach ($cassetteAllInstanceMethods as $class => $methods) {
+    foreach ((array) $methods as $method) {
+        installInstanceMethodHook((string) $class, (string) $method);
+    }
+}
+
+
+

@@ -256,10 +256,12 @@ test(cassetteName, async ({ page }) => {
             }
 
             // Non-HTML responses (JSON, plain-text etc.) are AJAX endpoints.
-            // Advance the pointer via a direct API request and skip the screenshot
-            // so the browser stays on the current page without navigating away.
-            if (!isHtmlResponse(entry)) {
-                console.log(`  #${index + 1}  GET   ${url}  (ajax – no screenshot)`);
+            // Also skip entries recorded with an empty body — the recording did not
+            // capture a response (e.g. streamed/binary output). In both cases:
+            // advance the pointer via a direct API request but skip the screenshot.
+            if (!isHtmlResponse(entry) || (entry.response?.body ?? '') === '') {
+                const reason = (entry.response?.body ?? '') === '' ? 'empty recorded body' : 'ajax – no screenshot';
+                console.log(`  #${index + 1}  GET   ${url}  (${reason})`);
                 await page.context().request.get(url);
                 if (debug) {
                     const pointerAfterAjax = fs.existsSync(pointerPath)
@@ -406,7 +408,32 @@ test(cassetteName, async ({ page }) => {
             // recorded as the next explicit GET step and will be handled there.
             console.log(`  #${index + 1}  POST  ${url}`);
             const isRawBody = (req.body ?? '') !== '';
-            const body = isRawBody ? req.body : new URLSearchParams(req.post ?? {}).toString();
+
+            // Extract a fresh _token from the current page DOM so the POST
+            // uses the session's actual CSRF token rather than the stale
+            // recorded one. Without this, Laravel returns 419 and all
+            // subsequent pages redirect to login.
+            let freshToken = null;
+            try {
+                freshToken = await page.evaluate(() => document.querySelector('input[name="_token"]')?.value ?? null);
+            } catch (_) {}
+
+            let body = isRawBody ? req.body : new URLSearchParams(req.post ?? {}).toString();
+
+            if (freshToken !== null) {
+                if (isRawBody) {
+                    // Replace _token= value in a URL-encoded raw body string.
+                    body = body.replace(/(?<=(?:^|&)_token=)[^&]*/g, encodeURIComponent(freshToken));
+                } else {
+                    const params = new URLSearchParams(req.post ?? {});
+                    if (params.has('_token')) {
+                        params.set('_token', freshToken);
+                    }
+                    body = params.toString();
+                }
+                dbg(`[step ${index}] injected fresh _token into POST body`);
+            }
+
             const contentType = isRawBody
                 ? (req.headers?.['CONTENT-TYPE'] ?? 'application/octet-stream')
                 : 'application/x-www-form-urlencoded';

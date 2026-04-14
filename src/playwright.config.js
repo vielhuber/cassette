@@ -38,6 +38,16 @@ module.exports = defineConfig({
     use: {
         // Self-signed certs on dev are fine — the recording already validated the content.
         ignoreHTTPSErrors: true,
-        headless: cassetteConfig.screenshot?.headless ?? true
-    }
+        headless: cassetteConfig.screenshot?.headless,
+        locale: 'de-DE',
+        launchOptions: {
+            args: ['--lang=de-DE', '--disable-dev-shm-usage', '--disable-setuid-sandbox'],
+            env: {
+                ...process.env,
+                LANG: 'de_DE.UTF-8',
+                LANGUAGE: 'de_DE:de',
+                LC_ALL: 'de_DE.UTF-8',
+            },
+        },
+    },
 });

@@ -1,10 +1,10 @@
 {
-    "ignoreUrls": ["/_mcp/", "/wp-cron.php"],
+    "ignoreUrls": [],
     "screenshot": {
         "headless": true,
         "zoom": 0.7,
         "maxDiffPixelRatio": 0.01,
-        "maskSelectors": [".footer__meta", ".toolbar"],
+        "maskSelectors": [],
         "maskDates": true,
         "timeout": 60000,
         "waitAfterGoto": 2000
