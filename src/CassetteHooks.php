@@ -129,9 +129,12 @@ function installFunctionHook(string $fn): void
                 $rehook = new CassetteRehook(static fn() => installFunctionHook($fn));
                 uopz_unset_return($fn);
                 $result = $fn(...$args);
-                // force fresh non-interned string allocations to avoid uopz interned-string-pool corruption
-                $result = unserialize(serialize($result));
-                Cassette::record($fn, $args, $result);
+                // Serialize once: the same string forces fresh non-interned string
+                // allocations (avoids uopz interned-string-pool corruption) AND is
+                // reused as the cassette tape entry — halves the hot-path work.
+                $serialized = serialize($result);
+                $result     = unserialize($serialized);
+                Cassette::recordSerialized($fn, $args, $serialized);
                 return $result;
                 // $rehook destructs here → reinstalls hook
             }
@@ -171,9 +174,10 @@ function installStaticMethodHook(string $class, string $method): void
                 $rehook = new CassetteRehook(static fn() => installStaticMethodHook($class, $method));
                 uopz_unset_return($class, $method);
                 $result = $class::$method(...$args);
-                // force fresh non-interned string allocations to avoid uopz interned-string-pool corruption
-                $result = unserialize(serialize($result));
-                Cassette::record($key, $args, $result);
+                // Serialize once — see comment in installFunctionHook().
+                $serialized = serialize($result);
+                $result     = unserialize($serialized);
+                Cassette::recordSerialized($key, $args, $serialized);
                 return $result;
             }
 
@@ -223,11 +227,12 @@ function installInstanceMethodHook(string $class, string $method): void
                 $rehook = new CassetteRehook(static fn() => installInstanceMethodHook($class, $method));
                 uopz_unset_return($class, $method);
                 $result = $that->$method(...$args);
-                // force fresh non-interned string allocations to avoid uopz interned-string-pool
-                // corruption: PDO property names are stored as (or reference) corrupted interned
-                // strings; unserialize/serialize creates clean heap-allocated copies outside the pool.
-                $result = unserialize(serialize($result));
-                Cassette::record($key, $args, $result);
+                // Serialize once — the same string forces fresh non-interned string
+                // allocations (PDO property names otherwise reference corrupted interned
+                // strings) AND becomes the cassette tape entry. Halves hot-path work.
+                $serialized = serialize($result);
+                $result     = unserialize($serialized);
+                Cassette::recordSerialized($key, $args, $serialized);
                 return $result;
             }
 

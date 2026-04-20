@@ -38,13 +38,7 @@ final class Cassette
     private static string $mode = '';
     private static string $cassettePath = '';
     private static string $pointerPath = '';
-
-    /**
-     * All recorded request buckets: list<array<string, list<array{args:array,return:string}>>>.
-     *
-     * @var list<array<string, list<array{args: array, return: string}>>>
-     */
-    private static array $allRequests = [];
+    private static string $bucketDir = '';
 
     /**
      * The bucket being written (record) or read (mock) for the current request.
@@ -65,7 +59,16 @@ final class Cassette
      */
     private static array $consumed = [];
 
-    /** Index of the current request inside $allRequests (mock: read, record: write). */
+    /**
+     * Pre-computed arg-key → list-of-indices map for the current bucket.
+     * Built once on load() so mock() performs O(1) lookups instead of scanning
+     * every stored entry and recomputing normalised keys on each call.
+     *
+     * @var array<string, array<string, list<int>>>
+     */
+    private static array $keyIndex = [];
+
+    /** Index of the current request (mock: read slot, record: write slot). */
     private static int $requestIndex = 0;
 
     /**
@@ -99,57 +102,37 @@ final class Cassette
             throw new \InvalidArgumentException("Unknown cassette mode: $mode");
         }
 
-        self::$mode = $mode;
-        self::$cassettePath = rtrim($basePath, '/') . '/' . $name . '/data.json';
-        self::$pointerPath = rtrim($basePath, '/') . '/' . $name . '/data.pointer';
-        self::$logPath     = rtrim($basePath, '/') . '/' . $name . '/record.log';
-        self::$allRequests = [];
-        self::$current = [];
-        self::$heads = [];
-        self::$consumed = [];
+        $runDir = rtrim($basePath, '/') . '/' . $name;
+
+        self::$mode         = $mode;
+        self::$cassettePath = $runDir . '/data.json';
+        self::$pointerPath  = $runDir . '/data.pointer';
+        self::$bucketDir    = $runDir . '/buckets';
+        self::$logPath      = $runDir . '/record.log';
+        self::$current      = [];
+        self::$heads        = [];
+        self::$consumed     = [];
+        self::$keyIndex     = [];
         self::$requestIndex = 0;
-        self::$config = [];
+        self::$config       = [];
 
         if ($mode === self::MODE_RECORD) {
-            // Load existing buckets so subsequent requests are appended correctly.
-            if (file_exists(self::$cassettePath)) {
-                $raw = (string) file_get_contents(self::$cassettePath);
-                // Support gzip-compressed files (written by save()) as well as
-                // legacy plain-text files recorded before compression was added.
-                $decompressed = @gzdecode($raw);
-                $decoded = json_decode($decompressed !== false ? $decompressed : $raw, true);
-                // Normalize to a dense list so every bucket is addressable by its
-                // integer index.  Sparse-encoded JSON objects ({"1":…}) are produced
-                // when index 0 is missing; convert them instead of discarding.
-                if (is_array($decoded)) {
-                    if (!array_is_list($decoded)) {
-                        $maxIdx     = empty($decoded) ? -1 : (int) max(array_keys($decoded));
-                        $normalized = array_fill(0, $maxIdx + 1, null);
-                        foreach ($decoded as $i => $bucket) {
-                            $normalized[(int) $i] = $bucket;
-                        }
-                        $decoded = $normalized;
-                    }
-                    self::$allRequests = $decoded;
-                }
-            }
-
             // Atomically claim the next recording slot using a per-run counter file
             // protected by an exclusive flock.  Without this, concurrent PHP-FPM workers
             // all see the same count of existing buckets and collide on the same index,
-            // causing later workers to overwrite earlier workers' buckets during recording.
-            $counterPath = dirname(self::$cassettePath) . '/data.counter';
-            if (!is_dir(dirname(self::$cassettePath))) {
-                mkdir(dirname(self::$cassettePath), 0775, true);
+            // causing later workers to overwrite earlier workers' buckets.
+            if (!is_dir($runDir)) {
+                mkdir($runDir, 0775, true);
             }
+            $counterPath = $runDir . '/data.counter';
             $counterFh   = fopen($counterPath, 'c+');
             if ($counterFh !== false) {
                 flock($counterFh, LOCK_EX);
-                $stored  = trim((string) fread($counterFh, 32));
-                // Use the higher of the stored counter and the actual bucket count so
-                // the engine recovers gracefully from stale counter files after e.g.
-                // a manual deletion of data.counter while data.json still exists.
-                $counter = max((int) $stored, count(self::$allRequests));
+                $stored = trim((string) fread($counterFh, 32));
+                // Use the higher of the stored counter and the highest existing bucket
+                // index so the engine recovers gracefully from stale counter files after
+                // a manual deletion while buckets/ is still populated.
+                $counter            = max((int) $stored, self::highestBucketIndex() + 1);
                 self::$requestIndex = $counter;
                 rewind($counterFh);
                 ftruncate($counterFh, 0);
@@ -158,18 +141,17 @@ final class Cassette
                 flock($counterFh, LOCK_UN);
                 fclose($counterFh);
             }
-            self::$current = [];
 
             // Reset the pointer file so the next mock run starts at index 0.
             if (file_exists(self::$pointerPath)) {
                 unlink(self::$pointerPath);
             }
 
-            // When starting a brand-new recording run (no existing data buckets),
-            // also clear the HTTP log and record log so stale entries from a
-            // previous run do not carry over.
+            // When starting a brand-new recording run (no existing buckets), also
+            // clear the HTTP log and record log so stale entries from a previous
+            // run do not carry over.
             if (self::$requestIndex === 0) {
-                $httpLogPath = dirname(self::$cassettePath) . '/http.json';
+                $httpLogPath = $runDir . '/http.json';
                 if (file_exists($httpLogPath)) {
                     unlink($httpLogPath);
                 }
@@ -180,43 +162,93 @@ final class Cassette
         }
 
         if ($mode === self::MODE_MOCK) {
-            if (!file_exists(self::$cassettePath)) {
-                // data.json does not exist yet — treat all buckets as empty.
-                // Hooks will log warnings and return null for unrecorded calls.
-                // Run `cassette record` first to populate data.json.
-                self::$allRequests = [];
-                self::$current = [];
-                return;
-            }
-
-            $raw = (string) file_get_contents(self::$cassettePath);
-            // Support gzip-compressed files as well as legacy plain-text files.
-            $decompressed = @gzdecode($raw);
-            $decoded = json_decode($decompressed !== false ? $decompressed : $raw, true);
-            // Normalize sparse-encoded JSON objects ({"1":…, "16":…}) to dense lists.
-            // Sparse encoding occurs when index 0 is missing (ghost request that claimed
-            // a slot but never saved), causing json_encode to produce a JSON object.
-            if (is_array($decoded) && !array_is_list($decoded)) {
-                $maxIdx     = empty($decoded) ? -1 : (int) max(array_keys($decoded));
-                $normalized = array_fill(0, $maxIdx + 1, null);
-                foreach ($decoded as $i => $bucket) {
-                    $normalized[(int) $i] = $bucket;
-                }
-                $decoded = $normalized;
-            }
-            self::$allRequests = $decoded ?? [];
-
             // Read the current request index from the pointer file.
             if (file_exists(self::$pointerPath)) {
-                $pointer = json_decode((string) file_get_contents(self::$pointerPath), true) ?? [];
+                $pointer            = json_decode((string) file_get_contents(self::$pointerPath), true) ?? [];
                 self::$requestIndex = (int) ($pointer['_request_index'] ?? 0);
             }
 
-            // Load the bucket for this request and reset per-callable heads.
-            self::$current = self::$allRequests[self::$requestIndex] ?? [];
-            self::$heads = [];
-            self::$consumed = [];
+            // Load ONLY the bucket for the current request index.  This replaces the
+            // previous behaviour of reading and decoding the complete data.json on
+            // every mock request — an O(N) cost that grew with the recording size.
+            self::$current = self::loadBucket(self::$requestIndex);
+
+            // Pre-compute the arg-key → indices map so mock() can do O(1) lookups
+            // instead of scanning the entire bucket and recomputing normalised
+            // keys on every intercepted call.
+            self::$keyIndex = [];
+            foreach (self::$current as $callable => $entries) {
+                foreach ($entries as $i => $entry) {
+                    $key = self::normalizeArgKey($entry['args']);
+                    if ($key !== null) {
+                        self::$keyIndex[$callable][$key][] = $i;
+                    }
+                }
+            }
         }
+    }
+
+    /**
+     * Highest existing bucket index in buckets/ plus any bucket stored in a
+     * legacy data.json.  Returns -1 when no buckets exist yet.
+     */
+    private static function highestBucketIndex(): int
+    {
+        $max = -1;
+
+        if (is_dir(self::$bucketDir)) {
+            foreach (glob(self::$bucketDir . '/*.json.gz') ?: [] as $bucketFile) {
+                $idx = (int) basename($bucketFile, '.json.gz');
+                if ($idx > $max) {
+                    $max = $idx;
+                }
+            }
+        }
+
+        if ($max < 0 && file_exists(self::$cassettePath)) {
+            // Legacy single-file recording — bucket count equals array length.
+            $raw          = (string) file_get_contents(self::$cassettePath);
+            $decompressed = @gzdecode($raw);
+            $decoded      = json_decode($decompressed !== false ? $decompressed : $raw, true);
+            if (is_array($decoded)) {
+                $max = empty($decoded) ? -1 : (int) max(array_keys($decoded));
+            }
+        }
+
+        return $max;
+    }
+
+    /**
+     * Load a single bucket from disk.  Prefers the per-bucket format introduced
+     * for performance; transparently falls back to extracting the bucket from
+     * a legacy data.json written by older cassette versions so existing
+     * recordings still replay without re-recording.
+     *
+     * @return array<string, list<array{args: array, return: string}>>
+     */
+    private static function loadBucket(int $index): array
+    {
+        $bucketFile = self::$bucketDir . '/' . $index . '.json.gz';
+
+        if (is_file($bucketFile)) {
+            $raw          = (string) file_get_contents($bucketFile);
+            $decompressed = @gzdecode($raw);
+            $decoded      = json_decode($decompressed !== false ? $decompressed : $raw, true);
+            return is_array($decoded) ? $decoded : [];
+        }
+
+        if (!file_exists(self::$cassettePath)) {
+            return [];
+        }
+
+        $raw          = (string) file_get_contents(self::$cassettePath);
+        $decompressed = @gzdecode($raw);
+        $decoded      = json_decode($decompressed !== false ? $decompressed : $raw, true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        return $decoded[$index] ?? [];
     }
 
     /**
@@ -237,8 +269,16 @@ final class Cassette
     }
 
     /**
-     * Persist recorded buckets to disk (called via shutdown function after
-     * the request completes).
+     * Persist the current request bucket to disk (called via shutdown function).
+     *
+     * Writes a single per-bucket file: buckets/{index}.json.gz.  This avoids
+     * the O(N²) read-modify-write cycle of the previous format that decoded
+     * and re-compressed the full data.json on every request.  Concurrent
+     * PHP-FPM workers are naturally safe because the request index is claimed
+     * atomically in load() — each worker writes to a unique file.
+     *
+     * Uses gzip level 1 instead of 6: roughly three times faster for test
+     * data with only a ~10% larger file size.
      */
     public static function save(): void
     {
@@ -246,74 +286,22 @@ final class Cassette
             return;
         }
 
-        $dir = dirname(self::$cassettePath);
-
-        if (!is_dir($dir)) {
-            mkdir($dir, 0775, true);
+        if (!is_dir(self::$bucketDir)) {
+            mkdir(self::$bucketDir, 0775, true);
         }
 
-        // Hold an exclusive lock for the entire read-modify-write cycle so that
-        // concurrent PHP-FPM workers do not overwrite each other's buckets.
-        $lockPath = $dir . '/data.lock';
-        $lockFh   = fopen($lockPath, 'c+');
-        if ($lockFh !== false) {
-            flock($lockFh, LOCK_EX);
-        }
-
-        // Re-read the latest data.json while holding the lock so we merge our
-        // bucket into the current state rather than stomping on buckets that
-        // other workers have already written.
-        $allRequests = [];
-        if (file_exists(self::$cassettePath)) {
-            $raw          = (string) file_get_contents(self::$cassettePath);
-            $decompressed = @gzdecode($raw);
-            $decoded      = json_decode($decompressed !== false ? $decompressed : $raw, true);
-            if (is_array($decoded)) {
-                if (!array_is_list($decoded)) {
-                    // Normalize sparse-encoded JSON objects produced by a previous save
-                    // where index 0 was missing (ghost request that claimed a slot but
-                    // never wrote any intercepted calls).
-                    $maxIdx     = empty($decoded) ? -1 : (int) max(array_keys($decoded));
-                    $normalized = array_fill(0, $maxIdx + 1, null);
-                    foreach ($decoded as $i => $bucket) {
-                        $normalized[(int) $i] = $bucket;
-                    }
-                    $decoded = $normalized;
-                }
-                $allRequests = $decoded;
-            }
-        }
-
-        // Attach this request's bucket at the pre-claimed slot.
-        $allRequests[self::$requestIndex] = self::$current;
-
-        // PHP encodes sparse integer-keyed arrays (e.g. [16 => data]) as JSON
-        // objects ({"16":…}) instead of JSON arrays ([…]).  A JSON object then
-        // fails the array_is_list() check on re-read, causing every subsequent
-        // save() to discard all previously written buckets.  Fill any index gaps
-        // with null so the array is always contiguous and round-trips as a JSON
-        // array.
-        $maxIdx = empty($allRequests) ? 0 : (int) max(array_keys($allRequests));
-        $dense  = array_fill(0, $maxIdx + 1, null);
-        foreach ($allRequests as $i => $bucket) {
-            $dense[(int) $i] = $bucket;
-        }
+        $bucketFile = self::$bucketDir . '/' . self::$requestIndex . '.json.gz';
 
         file_put_contents(
-            self::$cassettePath,
+            $bucketFile,
             gzencode(
-                (string) json_encode($dense, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                6
+                (string) json_encode(self::$current, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                1
             )
         );
 
-        if ($lockFh !== false) {
-            flock($lockFh, LOCK_UN);
-            fclose($lockFh);
-        }
-
         $callableCount = array_sum(array_map('count', self::$current));
-        self::log('saved bucket #' . self::$requestIndex . " — $callableCount intercepted call(s), total " . count($allRequests) . ' bucket(s)');
+        self::log('saved bucket #' . self::$requestIndex . " — $callableCount intercepted call(s)");
     }
 
     // -------------------------------------------------------------------
@@ -347,15 +335,37 @@ final class Cassette
     /**
      * Record a completed external call into the current request bucket.
      *
+     * Prefer recordSerialized() from hot paths — the hook has already paid the
+     * cost of serializing the return value (to force fresh non-interned string
+     * allocations) and can pass that string straight through, avoiding a
+     * redundant second serialize() here.
+     *
      * @param string $callable  e.g. "__::curl" or "db_fetch_row"
      * @param array  $args      Positional arguments passed to the callable.
      * @param mixed  $return    Actual return value (will be serialized).
      */
     public static function record(string $callable, array $args, mixed $return): void
     {
+        self::recordSerialized($callable, $args, self::serializeReturn($return));
+    }
+
+    /**
+     * Record a call whose return value has already been PHP-serialized.
+     *
+     * Halves the serialize cost in the record hot path: the hooks serialize
+     * once to produce a fresh object graph (via unserialize(serialize(...))
+     * — required to work around uopz's interned-string-pool corruption) and
+     * pass that same string directly as the tape entry.
+     *
+     * @param string $callable           e.g. "__::curl" or "db_fetch_row"
+     * @param array  $args               Positional arguments passed to the callable.
+     * @param string $serializedReturn   Already-serialized return value.
+     */
+    public static function recordSerialized(string $callable, array $args, string $serializedReturn): void
+    {
         self::$current[$callable][] = [
-            'args' => self::serializeArgs($args),
-            'return' => self::serializeReturn($return)
+            'args'   => self::serializeArgs($args),
+            'return' => $serializedReturn
         ];
     }
 
@@ -388,18 +398,18 @@ final class Cassette
         $liveKey = self::normalizeArgKey($args);
 
         // --- Tier 1: arg-key match ----------------------------------------
-        // Find the first unconsumed entry whose normalised key equals the
-        // caller's key.  When several entries share the same key they are
-        // served in recording order (sequential within the matching group).
+        // Use the pre-computed key index for O(1) lookup instead of walking
+        // every entry and re-normalising its arg key on each call.  When
+        // several entries share the same key they are served in recording
+        // order (sequential within the matching group).
         if ($liveKey !== null) {
-            foreach ($entries as $i => $entry) {
+            $indicesForKey = self::$keyIndex[$callable][$liveKey] ?? [];
+            foreach ($indicesForKey as $i) {
                 if (isset(self::$consumed[$callable][$i])) {
                     continue;
                 }
-                if (self::normalizeArgKey($entry['args']) === $liveKey) {
-                    self::$consumed[$callable][$i] = true;
-                    return self::deserializeReturn($entry['return']);
-                }
+                self::$consumed[$callable][$i] = true;
+                return self::deserializeReturn($entries[$i]['return']);
             }
 
             // No matching entry found — log and fall through to sequential.

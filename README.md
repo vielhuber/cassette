@@ -23,9 +23,10 @@ composer require --dev vielhuber/cassette
 > **uopz should only be enabled temporarily** — disable it in production and re-enable it only when recording or replaying. All required settings are toggled via a single conf.d override file (`zzz-cassette.ini`):
 
 ```bash
-PHP_VER=8.1  # adjust to your PHP version
+# adjust to your PHP version
+PHP_VER=8.5
 
-# enable (the sed line removes any legacy pool config entries from older installations)
+# enable
 printf '[uopz]\nuopz.exit = 1\n[opcache]\nopcache.enable = 0\n[xdebug]\nxdebug.mode = off\n[blackfire]\nblackfire.apm_enabled = 0\n' | sudo tee /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini
 sudo phpenmod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
 

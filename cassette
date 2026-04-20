@@ -37,12 +37,17 @@ $nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delet
 
 if ($command === '' || ($nameRequired && $name === '')) {
     echo "Usage:\n";
-    echo "  vendor/bin/cassette record  <name>            — record a new flow\n";
-    echo "  vendor/bin/cassette replay  <name> [--refresh] [--debug] — HTTP diff + visual screenshot regression\n";
-    echo "  vendor/bin/cassette accept  <name>            — interactively accept HTTP diffs as new baseline\n";
-    echo "  vendor/bin/cassette stop    <name>            — stop recording, keep data for later replay\n";
-    echo "  vendor/bin/cassette delete  <name>            — delete a run and all its data\n";
-    echo "  vendor/bin/cassette list                      — list all recorded runs\n";
+    echo "  vendor/bin/cassette record  <name>                    — record a new flow\n";
+    echo "  vendor/bin/cassette replay  <name> [options]          — HTTP diff + visual screenshot regression\n";
+    echo "                                options: --refresh, --debug, --http-only,\n";
+    echo "                                         --screenshot-only, --base-url=<url>\n";
+    echo "  vendor/bin/cassette accept  <name>                    — interactively accept HTTP diffs as new baseline\n";
+    echo "  vendor/bin/cassette stop    <name>                    — stop recording, keep data for later replay\n";
+    echo "  vendor/bin/cassette delete  <name> [--force]          — delete a run and all its data\n";
+    echo "  vendor/bin/cassette delete  --all [--force]           — delete all runs\n";
+    echo "  vendor/bin/cassette list                              — list all recorded runs\n";
+    echo "\n";
+    echo "  --root=<path>                                         — override auto-detected project root\n";
     exit(1);
 }
 
@@ -94,9 +99,13 @@ $config = file_exists($configPath)
 switch ($command) {
     case 'record':
         // Delete existing cassette files so a clean recording starts.
+        // data.counter must also be removed — otherwise the previous run's
+        // counter value carries over and the fresh recording starts at a
+        // non-zero bucket index, leaving gaps at 0..N-1.
         $toDelete = [
             $cassettesDir . '/' . $name . '/data.json',
             $cassettesDir . '/' . $name . '/data.pointer',
+            $cassettesDir . '/' . $name . '/data.counter',
             $cassettesDir . '/' . $name . '/http.json',
             $cassettesDir . '/' . $name . '/.started',
         ];
@@ -104,6 +113,16 @@ switch ($command) {
         foreach ($toDelete as $path) {
             if (file_exists($path)) {
                 unlink($path);
+            }
+        }
+
+        // buckets/ holds the per-bucket files that replaced the monolithic
+        // data.json — nuke it so the fresh recording does not mix old buckets
+        // into the new flow.
+        $bucketsDir = $cassettesDir . '/' . $name . '/buckets';
+        if (is_dir($bucketsDir)) {
+            foreach (glob($bucketsDir . '/*.json.gz') ?: [] as $old) {
+                unlink($old);
             }
         }
 
@@ -414,7 +433,10 @@ switch ($command) {
             $requests    = 0;
 
             if (file_exists($httpLog)) {
-                $requests = count(json_decode((string) file_get_contents($httpLog), true) ?? []);
+                $raw          = (string) file_get_contents($httpLog);
+                // Support gzip-compressed files as well as legacy plain-text files.
+                $decompressed = @gzdecode($raw);
+                $requests     = count(json_decode($decompressed !== false ? $decompressed : $raw, true) ?? []);
             }
 
             $marker         = $run === $active ? " \033[33m← active\033[0m" : '';
@@ -532,9 +554,14 @@ function interactiveAcceptDiffs(string $httpDiffDir, string $httpLogPath): int
         return count($diffFiles);
     }
 
-    $httpLog  = json_decode((string) file_get_contents($httpLogPath), true) ?? [];
-    $accepted = 0;
-    $skipped  = 0;
+    // Support gzip-compressed http.json (written by CassetteHttpRecorder) as well
+    // as legacy plain-text files recorded before compression was added.
+    $rawLog       = (string) file_get_contents($httpLogPath);
+    $decompressed = @gzdecode($rawLog);
+    $httpLog      = json_decode($decompressed !== false ? $decompressed : $rawLog, true) ?? [];
+    $wasGzipped   = $decompressed !== false;
+    $accepted     = 0;
+    $skipped      = 0;
 
     foreach ($diffFiles as $diffFile) {
         $step       = (int) basename($diffFile, '.diff');
@@ -575,9 +602,14 @@ function interactiveAcceptDiffs(string $httpDiffDir, string $httpLogPath): int
     }
 
     if ($accepted > 0) {
+        $encoded = (string) json_encode($httpLog, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         file_put_contents(
             $httpLogPath,
-            json_encode($httpLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n"
+            // Preserve the on-disk encoding: re-gzip when the source was gzipped,
+            // otherwise write pretty-printed JSON as the legacy format did.
+            $wasGzipped
+                ? gzencode($encoded, 6)
+                : (string) json_encode($httpLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n"
         );
     }
 

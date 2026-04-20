@@ -32,7 +32,7 @@ final class CassetteHttpRecorder
      */
     public static function start(string $cassetteName, string $mode, string $basePath): void
     {
-        if ($mode !== 'record') {
+        if ($mode !== Cassette::MODE_RECORD) {
             return;
         }
 
@@ -133,6 +133,10 @@ final class CassetteHttpRecorder
 
     /**
      * Append the request/response pair to the HTTP log file.
+     *
+     * Holds an exclusive flock for the whole read-modify-write cycle so
+     * concurrent PHP-FPM workers do not overwrite each other's entries
+     * (mirrors the locking strategy in Cassette::save()).
      */
     private static function persist(string $responseBody): void
     {
@@ -145,30 +149,44 @@ final class CassetteHttpRecorder
             ]
         ];
 
-        $log = [];
-
-        if (file_exists(self::$logPath)) {
-            $raw = (string) file_get_contents(self::$logPath);
-            // Support gzip-compressed files as well as legacy plain-text files.
-            $decompressed = @gzdecode($raw);
-            $log = json_decode($decompressed !== false ? $decompressed : $raw, true) ?? [];
-        }
-
-        $log[] = $entry;
-
         $dir = dirname(self::$logPath);
 
         if (!is_dir($dir)) {
             mkdir($dir, 0775, true);
         }
 
+        $lockPath = $dir . '/http.lock';
+        $lockFh   = fopen($lockPath, 'c+');
+
+        if ($lockFh !== false) {
+            flock($lockFh, LOCK_EX);
+        }
+
+        $log = [];
+
+        if (file_exists(self::$logPath)) {
+            $raw = (string) file_get_contents(self::$logPath);
+            // Support gzip-compressed files as well as legacy plain-text files.
+            $decompressed = @gzdecode($raw);
+            $log          = json_decode($decompressed !== false ? $decompressed : $raw, true) ?? [];
+        }
+
+        $log[] = $entry;
+
+        // gzip level 1: roughly 3x faster than the default 6 for ~10% larger
+        // output, a worthwhile trade for hot-path recording of test data.
         file_put_contents(
             self::$logPath,
             gzencode(
                 (string) json_encode($log, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                6
+                1
             )
         );
+
+        if ($lockFh !== false) {
+            flock($lockFh, LOCK_UN);
+            fclose($lockFh);
+        }
     }
 
     /**
