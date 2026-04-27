@@ -39,8 +39,55 @@ declare(strict_types=1);
  */
 
 if (!extension_loaded('uopz')) {
+    $phpVersion   = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+    $phpSapi      = PHP_SAPI;
+    $iniFiles     = php_ini_loaded_file() ?: 'none';
+    $scanDir      = php_ini_scanned_files() ?: 'none';
+    $extDir       = ini_get('extension_dir') ?: 'unknown';
+    $soExists     = is_file($extDir . '/uopz.so') ? 'yes' : 'no';
+    $zendExts     = implode(', ', get_loaded_extensions(true)) ?: 'none';
+    $regularExts  = implode(', ', get_loaded_extensions(false)) ?: 'none';
+    $errorLog     = ini_get('error_log') ?: 'none';
+
+    // read last 20 lines of the php error log for uopz-related entries
+    $logSnippet = '';
+    if ($errorLog !== 'none' && is_readable($errorLog)) {
+        $lines = file($errorLog) ?: [];
+        $recent = array_slice($lines, -20);
+        $relevant = array_filter($recent, static fn(string $l): bool => stripos($l, 'uopz') !== false || stripos($l, 'Cannot load') !== false || stripos($l, 'Unable to load') !== false);
+        if ($relevant !== []) {
+            $logSnippet = "\n  error_log matches:\n    " . implode('    ', $relevant);
+        }
+    }
+
+    $xdebugHint = extension_loaded('xdebug')
+        ? "\n  *** Xdebug is loaded — this prevents uopz from initialising. ***\n" .
+          "  Disable it before enabling uopz:\n" .
+          "    sudo phpdismod -v {$phpVersion} xdebug && sudo systemctl restart php{$phpVersion}-fpm\n"
+        : '';
+
     throw new \RuntimeException(
-        'uopz PHP extension is required for cassette hooks. Install via: pecl install uopz'
+        "uopz PHP extension is not loaded.\n" .
+        "  PHP version   : {$phpVersion}\n" .
+        "  SAPI          : {$phpSapi}\n" .
+        "  uopz.so       : {$extDir}/uopz.so (exists: {$soExists})\n" .
+        "  php.ini       : {$iniFiles}\n" .
+        "  error_log     : {$errorLog}\n" .
+        "  Zend exts     : {$zendExts}\n" .
+        "  regular exts  : {$regularExts}\n" .
+        "  scanned       : {$scanDir}\n" .
+        $logSnippet .
+        $xdebugHint .
+        "\n" .
+        "Install and enable:\n" .
+        "  sudo apt-get install php{$phpVersion}-uopz\n" .
+        "  sudo phpenmod -v {$phpVersion} uopz\n" .
+        "  sudo phpdismod -v {$phpVersion} xdebug\n" .
+        "  sudo systemctl restart php{$phpVersion}-fpm\n" .
+        "\n" .
+        "Verify it is loaded for the correct SAPI ({$phpSapi}):\n" .
+        "  php{$phpVersion} -m | grep uopz            # CLI\n" .
+        "  php-fpm{$phpVersion} -m | grep uopz        # FPM\n"
     );
 }
 

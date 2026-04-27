@@ -27,12 +27,10 @@ composer require --dev vielhuber/cassette
 PHP_VER=8.5
 
 # enable
-printf '[uopz]\nuopz.exit = 1\n[opcache]\nopcache.enable = 0\n[xdebug]\nxdebug.mode = off\n[blackfire]\nblackfire.apm_enabled = 0\n' | sudo tee /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini
-sudo phpenmod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
+printf '[uopz]\nuopz.exit = 1\n[opcache]\nopcache.enable = 0\n[xdebug]\nxdebug.mode = off\n[blackfire]\nblackfire.apm_enabled = 0\n' | sudo tee /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini && sudo phpenmod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
 
 # disable
-sudo rm -f /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini
-sudo phpdismod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
+sudo rm -f /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini && sudo phpdismod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
 ```
 
 > - `uopz.exit = 1` — restores normal exit semantics (the default `0` silently suppresses all `exit()` / `die()` calls)
