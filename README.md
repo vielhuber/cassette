@@ -20,61 +20,11 @@ composer require --dev vielhuber/cassette
 - PHP ≥ 8.3 with the [uopz](https://www.php.net/manual/en/book.uopz.php) extension
 - Node.js (for visual screenshot regression — installed automatically on first use)
 
-> **uopz should only be enabled temporarily** — disable it in production and re-enable it only when recording or replaying. All required settings are toggled via a single conf.d override file (`zzz-cassette.ini`):
+**Toggle uopz and inject the bootstrap line** — `cassette-toggle` enables/disables uopz (incl. the PHP 8.5 patch) and writes/removes the `require_once` hook in `wp-config.php` (WordPress) or `public/index.php` (Laravel):
 
 ```bash
-# adjust to your PHP version
-PHP_VER=8.5
-
-# enable
-printf '[uopz]\nuopz.exit = 1\n[opcache]\nopcache.enable = 0\n[xdebug]\nxdebug.mode = off\n[blackfire]\nblackfire.apm_enabled = 0\n' | sudo tee /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini && sudo phpenmod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
-
-# disable
-sudo rm -f /etc/php/$PHP_VER/fpm/conf.d/zzz-cassette.ini && sudo phpdismod -v $PHP_VER uopz && sudo systemctl restart php$PHP_VER-fpm
-```
-
-> - `uopz.exit = 1` — restores normal exit semantics (the default `0` silently suppresses all `exit()` / `die()` calls)
-> - `opcache.enable = 0` — avoids a [known uopz + opcache incompatibility](https://github.com/krakjoe/uopz/pull/132) that can corrupt interned strings (symptom: `preg_match_all(): Null byte in regex`)
-> - `xdebug.mode = off` — Xdebug and uopz both instrument bytecodes at the Zend engine level and conflict with each other; `xdebug.mode` is a `PHP_INI_SYSTEM` setting that cannot be overridden via `php_admin_value` in the pool config, so all settings live in `zzz-cassette.ini`; the `zzz-` prefix ensures the file sorts after any `custom.ini` in the same conf.d directory
-> - `blackfire.apm_enabled = 0` — Blackfire APM also instruments the Zend engine and can trigger the same null-byte corruption in combination with uopz
-
-**Bootstrap** — add one line to your entry point before any application code runs:
-
-```php
-require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
-```
-
-The bootstrap is a no-op when no cassette is active, so it is always safe to keep this line in place.
-
-**Laravel** — add the line to `public/index.php`, right before the first `require` statement (i.e. before the autoloader):
-
-```php
-<?php
-
-// ...
-
-require_once __DIR__.'/../vendor/vielhuber/cassette/src/bootstrap.php';
-
-require __DIR__.'/../bootstrap/autoload.php'; // or vendor/autoload.php in newer Laravel versions
-```
-
-The path is `__DIR__.'/../vendor/...'` because `public/index.php` sits one level below the project root. `public/index.php` is the earliest possible hook point in Laravel — uopz overrides are in place before the autoloader, the service container, and any service providers are initialised.
-
-**Development tip** — when working on cassette itself alongside a project, point the `require_once` directly at the cassette source directory instead of the installed vendor copy. The bootstrap detects the project root via `SCRIPT_FILENAME`, so this works correctly even from a non-vendor path:
-
-```php
-// use live cassette source in dev, installed package everywhere else
-require_once file_exists('/var/www/cassette/src/bootstrap.php')
-    ? '/var/www/cassette/src/bootstrap.php'
-    : __DIR__.'/../vendor/vielhuber/cassette/src/bootstrap.php';
-```
-
-No file copying or symlinks needed. Changes to cassette's source take effect immediately on the next request.
-
-**WordPress** — add the line to `wp-config.php`, before `require_once ABSPATH . 'wp-settings.php';`:
-
-```php
-require_once __DIR__ . '/vendor/vielhuber/cassette/src/bootstrap.php';
+./cassette-toggle start --php=8.5 --root=/var/www/my-project
+./cassette-toggle stop  --php=8.5 --root=/var/www/my-project
 ```
 
 `.cassette/config.json` is created automatically on the first `vendor/bin/cassette record` call.
