@@ -124,13 +124,6 @@ $cookieJar = tempnam(sys_get_temp_dir(), 'cassette_replay_');
 // Directory for per-request diff files (created on demand).
 $diffDir = $runDir . '/http';
 
-// Pre-seed the cookie jar from the first request so initial authentication works.
-mergeCookiesIntoJar(
-    $log[0]['request']['cookies'] ?? [],
-    parse_url($defaultBaseUrl, PHP_URL_HOST) ?? 'localhost',
-    $cookieJar
-);
-
 // Track the last GET response body so CSRF tokens can be extracted for POST requests.
 $lastGetBody = '';
 
@@ -141,9 +134,18 @@ foreach ($log as $index => $entry) {
     // Each request uses its own recorded base_url unless a global override was given.
     $baseUrl = $baseUrlOverride ?? ($request['base_url'] ?? $defaultBaseUrl);
 
-    // Merge this request's recorded cookies into the jar so any cookies set
-    // mid-session (e.g. after a POST) are active for subsequent requests.
-    mergeCookiesIntoJar($request['cookies'] ?? [], parse_url($baseUrl, PHP_URL_HOST) ?? 'localhost', $cookieJar);
+    // Rebuild the cookie jar from THIS request's recorded cookies only.
+    // Each recorded "cookies" snapshot is exactly what the browser would have
+    // sent at that point of the original session, so replaying that set
+    // verbatim mirrors recording faithfully and avoids state leakage between
+    // requests — most notably, transient flash cookies (Set-Cookie deletions
+    // that curl's COOKIEJAR persistence does NOT honour reliably across calls)
+    // never accumulate from one replay step to the next.
+    rebuildCookieJar(
+        $request['cookies'] ?? [],
+        parse_url($baseUrl, PHP_URL_HOST) ?? 'localhost',
+        $cookieJar
+    );
 
     // For POST requests that include a Laravel CSRF token, extract the fresh
     // _token from the last GET response and inject it into the POST data.
@@ -170,6 +172,14 @@ foreach ($log as $index => $entry) {
     $fullUrl = $baseUrl . $request['uri'];
     $displayUrl = mb_strlen($fullUrl) > 100 ? mb_substr($fullUrl, 0, 100) . '…' : $fullUrl;
     $label = sprintf('#%d  %-4s  %s', $index + 1, $request['method'], $displayUrl);
+
+    // Point the FPM-side mock at the bucket recorded for THIS request. With
+    // concurrent requests during recording, bucket-claim order can diverge
+    // from http.json append order, so http.json[$index] may correspond to a
+    // different bucket index than $index. The recording embeds 'bucket' in
+    // each entry; fall back to $index for backwards compatibility.
+    $bucketIndex = $entry['bucket'] ?? $index;
+    file_put_contents($pointerPath, json_encode(['_request_index' => $bucketIndex], JSON_PRETTY_PRINT));
 
     [$actualStatus, $actualBody, $curlError] = executeRequest($request, $baseUrl, $cookieJar, $requestTimeoutSeconds);
 
@@ -251,61 +261,69 @@ exit($failed > 0 ? 1 : 0);
 // -------------------------------------------------------------------
 
 /**
- * Merge recorded cookies into a Netscape-format cookie jar file.
+ * Replace the cookie jar file with EXACTLY the recorded cookie set.
  *
- * Reads the existing jar, overwrites entries with matching name+domain,
- * and appends new ones. This preserves any cookies the server has set
- * via Set-Cookie headers during the replay while also injecting the
- * cookies that were present in the original recorded request.
+ * Each recorded $request['cookies'] snapshot is the literal Cookie header the
+ * original browser sent at that point in the session — replaying it verbatim
+ * is the closest possible mirror of recording. Unlike a merge approach this
+ * also drops any cookies that the server set during the previous replay step
+ * (e.g. transient flash messages) but that the original session no longer
+ * carried by the next request — curl's own Set-Cookie deletion handling does
+ * not always honour `Max-Age=0` reliably when the jar was pre-populated, and
+ * leftover cookies leak into later requests producing spurious diffs.
  *
  * @param array<string,string> $cookies  Name → value pairs from the recorded snapshot.
  * @param string               $host     Domain to bind the cookies to.
  * @param string               $jarPath  Path to the Netscape cookie jar file.
  */
-function mergeCookiesIntoJar(array $cookies, string $host, string $jarPath): void
+function rebuildCookieJar(array $cookies, string $host, string $jarPath): void
 {
-    if (empty($cookies)) {
-        return;
-    }
-
-    // Parse existing jar into a keyed map ["domain|name" => line].
-    $existing = [];
-
-    if (file_exists($jarPath)) {
-        foreach (explode("\n", file_get_contents($jarPath)) as $line) {
-            $line = trim($line);
-            if ($line === '' || str_starts_with($line, '#')) {
-                continue;
-            }
-            $parts = explode("\t", $line);
-            if (count($parts) >= 7) {
-                $existing[$parts[0] . '|' . $parts[5]] = $line;
-            }
-        }
-    }
-
-    // Merge: recorded cookies overwrite existing entries for same domain+name.
     // Netscape cookie format requires the domain to start with a dot so that
     // curl actually sends the cookie with the request. Without the leading dot
     // curl silently skips the cookie when matching against the request host.
     $dotHost = str_starts_with($host, '.') ? $host : '.' . $host;
 
+    $lines = ['# Netscape HTTP Cookie File'];
     foreach ($cookies as $name => $value) {
-        $existing[$dotHost . '|' . $name] = implode("\t", [
-            $dotHost, // domain (leading dot = send for this host and subdomains)
-            'TRUE', // include subdomains (required when domain starts with dot)
-            '/', // path
-            'FALSE', // secure
-            '0', // expiry (session)
+        $lines[] = implode("\t", [
+            $dotHost,        // domain (leading dot = send for this host and subdomains)
+            'TRUE',          // include subdomains (required when domain starts with dot)
+            '/',             // path
+            'FALSE',         // secure
+            '0',             // expiry (session)
             $name,
-            $value
+            $value,
         ]);
     }
 
-    file_put_contents(
-        $jarPath,
-        implode("\n", array_merge(['# Netscape HTTP Cookie File'], array_values($existing))) . "\n"
-    );
+    file_put_contents($jarPath, implode("\n", $lines) . "\n");
+}
+
+/**
+ * Read a single cookie value out of the Netscape cookie jar.
+ *
+ * Returns the URL-decoded value (which is what the browser would expose to JS
+ * via document.cookie / what an axios `xsrfHeaderName` interceptor sends as a
+ * header). Returns null when no cookie of that name is in the jar.
+ */
+function extractCookieFromJar(string $jarPath, string $name): ?string
+{
+    if (!file_exists($jarPath)) {
+        return null;
+    }
+
+    foreach (explode("\n", (string) file_get_contents($jarPath)) as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+        $parts = explode("\t", $line);
+        if (count($parts) >= 7 && $parts[5] === $name) {
+            return urldecode($parts[6]);
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -352,18 +370,40 @@ function executeRequest(array $request, string $baseUrl, string $cookieJar, int 
     // so that PHP's default application/x-www-form-urlencoded parsing kicks in.
     $isReencodedForm = $request['method'] === 'POST' && ($request['body'] ?? '') === '' && !empty($request['post']);
 
-    $safe = ['accept', 'accept-language', 'x-requested-with'];
+    // x-xsrf-token / x-csrf-token / referer are critical for Laravel Sanctum
+    // and CSRF middleware on /api/* routes — without them the server rejects
+    // authenticated XHR requests with 401/419 even when cookies are correct.
+    $safe = ['accept', 'accept-language', 'x-requested-with', 'x-csrf-token', 'referer'];
 
     if (!$isReencodedForm) {
         $safe[] = 'content-type';
     }
 
+    // Pull the current XSRF-TOKEN out of the cookie jar (server may have rotated
+    // it during replay) and use that as the X-XSRF-TOKEN header. The cookie
+    // value is URL-encoded; the header carries the decoded value.
+    $freshXsrf = extractCookieFromJar($cookieJar, 'XSRF-TOKEN');
+
     $forwardHeaders = [];
+    $sentXsrf = false;
 
     foreach ($request['headers'] ?? [] as $name => $value) {
-        if (in_array(strtolower($name), $safe, true)) {
+        $lower = strtolower($name);
+        if ($lower === 'x-xsrf-token') {
+            $forwardHeaders[] = 'X-XSRF-TOKEN: ' . ($freshXsrf ?? $value);
+            $sentXsrf = true;
+            continue;
+        }
+        if (in_array($lower, $safe, true)) {
             $forwardHeaders[] = "$name: $value";
         }
+    }
+
+    // The recording may have been captured without an explicit X-XSRF-TOKEN
+    // header (axios reads the cookie at runtime) — always send it when the
+    // jar carries one, so stateful Sanctum requests authenticate.
+    if (!$sentXsrf && $freshXsrf !== null) {
+        $forwardHeaders[] = 'X-XSRF-TOKEN: ' . $freshXsrf;
     }
 
     if (!empty($forwardHeaders)) {
@@ -419,6 +459,10 @@ function normalizeBody(string $body): string
 
     // Page render timing in footer (e.g. | 6,25s | or | 0.52s |).
     $body = preg_replace('/\|\s*[\d,.]+s\s*\|/', '| __TIME__ |', $body) ?? $body;
+
+    // App version markers in the footer (e.g. "v7.88", "v12.3.1") — bumped on
+    // every deploy so we mask them rather than diff against a stale value.
+    $body = preg_replace('/\bv\d+(?:\.\d+)+\b/', '__VERSION__', $body) ?? $body;
 
     // Generic duration values (e.g. "0.464s" in metainfo spans).
     $body = preg_replace('/\b\d+[.,]\d+s\b/', '__DURATION__', $body) ?? $body;

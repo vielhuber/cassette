@@ -134,13 +134,6 @@ test(cassetteName, async ({ page }) => {
         });
     }
 
-    // Pre-seed auth cookies so the very first request is already authenticated.
-    const initialCookies = buildCookies(firstReq.cookies ?? {}, defaultBaseUrl);
-
-    if (initialCookies.length > 0) {
-        await page.context().addCookies(initialCookies);
-    }
-
     // Handlers registered in the previous step — kept active so that delayed
     // JS-initiated sub-requests (e.g. lazy-load fetches that fire after networkidle)
     // are still intercepted. Unrouted at the START of the next iteration.
@@ -152,6 +145,19 @@ test(cassetteName, async ({ page }) => {
         // replayed on CI, localhost, staging, etc. without re-recording.
         const baseUrl = baseUrlOverride ?? req.base_url ?? defaultBaseUrl;
         const url = baseUrl + req.uri;
+
+        // Reset the browser cookie jar to EXACTLY the cookies the original
+        // browser sent on this step. This mirrors the per-request rebuild that
+        // HTTP-replay now uses — without it the very first step would be the
+        // pre-login wp-login.php request whose cookies do not yet include the
+        // auth cookie, so every subsequent navigation lands on the login form.
+        // Resetting per step also stops transient flash cookies from leaking
+        // between steps.
+        await page.context().clearCookies();
+        const stepCookies = buildCookies(req.cookies ?? {}, baseUrl);
+        if (stepCookies.length > 0) {
+            await page.context().addCookies(stepCookies);
+        }
 
         // Unroute the previous step's handlers now that this new step is
         // about to register its own routes. Any delayed sub-requests from the
@@ -366,6 +372,43 @@ test(cassetteName, async ({ page }) => {
                 });
             }
 
+            // Wait for everything that commonly keeps the page repainting and
+            // flakes toHaveScreenshot's stability detection: web fonts arriving
+            // late (FOUT), images still streaming, queued requestAnimationFrame
+            // callbacks. This eliminates the most frequent intermittent
+            // "screenshot did not stabilize" failures on otherwise stable pages.
+            await page.evaluate(async () => {
+                if (document.fonts?.ready) {
+                    await document.fonts.ready;
+                }
+                await Promise.all(
+                    Array.from(document.images).map((img) =>
+                        img.complete && img.naturalWidth > 0
+                            ? Promise.resolve()
+                            : new Promise((resolve) => {
+                                  const done = () => resolve();
+                                  img.addEventListener('load', done, { once: true });
+                                  img.addEventListener('error', done, { once: true });
+                                  // Safety net for never-resolving image fetches.
+                                  setTimeout(done, 5000);
+                              }),
+                    ),
+                );
+                // Two RAFs guarantee any pending layout/paint work has flushed.
+                await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            });
+
+            // Stop background JS timers (polling, debounced re-renders) so they
+            // can't fire mid-capture and keep toHaveScreenshot retrying. Done
+            // last so legitimate post-load init code already ran.
+            await page.evaluate(() => {
+                const maxId = setTimeout(() => {}, 0);
+                for (let i = 1; i <= maxId; i++) {
+                    clearInterval(i);
+                    clearTimeout(i);
+                }
+            });
+
             // Give the browser a moment to re-layout after the DOM modifications.
             await page.waitForTimeout(500);
 
@@ -376,6 +419,12 @@ test(cassetteName, async ({ page }) => {
                     fullPage: true,
                     maxDiffPixelRatio,
                     timeout,
+                    // Defensive: even though Playwright defaults these to
+                    // 'disabled' / 'hide' since 1.20, declare them explicitly
+                    // so future Playwright defaults can't silently regress
+                    // screenshot stability.
+                    animations: 'disabled',
+                    caret: 'hide',
                 });
             } catch (_e) {
                 const isTimeout = _e?.message?.includes('Timeout') || _e?.message?.includes('timeout');

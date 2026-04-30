@@ -140,7 +140,24 @@ final class CassetteHttpRecorder
      */
     private static function persist(string $responseBody): void
     {
+        // Drop responses with no body — typically broken asset URLs (404
+        // images), HEAD-style probes, or routes that streamed binary content
+        // outside the output buffer. They contribute nothing to regression
+        // coverage (replay has no body to diff against) and would otherwise
+        // pollute http.json plus leave an orphan bucket on disk. Tell
+        // Cassette to skip the bucket too so save() does not land an empty
+        // file in buckets/.
+        if ($responseBody === '') {
+            Cassette::skipBucket();
+            return;
+        }
+
         $entry = [
+            // Bucket index assigned to this request by Cassette::load(). Embed
+            // it here so replay can pair HTTP entries with the exact recorded
+            // bucket — concurrent FPM workers may claim bucket slots in a
+            // different order than they finish writing http.json.
+            'bucket' => Cassette::getRequestIndex(),
             'request' => self::$requestSnapshot,
             'response' => [
                 'status' => http_response_code() ?: 200,

@@ -68,6 +68,37 @@ final class Cassette
      */
     private static array $keyIndex = [];
 
+    /**
+     * Cross-bucket fallback index — entries from every other bucket on disk,
+     * keyed identically to $keyIndex but pointing into $foreignEntries. Built
+     * lazily on first miss in mock(); rescues replays where bucket-claim
+     * order diverged from http.json append order during recording (concurrent
+     * FPM workers) and recordings that pre-date the bucket-id embedding in
+     * http.json.
+     *
+     * @var array<string, array<string, list<int>>>
+     */
+    private static array $foreignKeyIndex = [];
+
+    /**
+     * Flat list of entries pulled in from non-current buckets — referenced by
+     * indices stored in $foreignKeyIndex.
+     *
+     * @var array<string, list<array{args: array, return: string}>>
+     */
+    private static array $foreignEntries = [];
+
+    /** Lazy guard: true once buildForeignIndex() has run for this request. */
+    private static bool $foreignIndexBuilt = false;
+
+    /**
+     * When true, save() bails out without writing the bucket. Set by
+     * skipBucket() — the HTTP recorder uses this to drop entire requests
+     * whose response body was empty (broken asset URLs, 404 images, etc.)
+     * so they never become orphan buckets on disk.
+     */
+    private static bool $bucketSkipped = false;
+
     /** Index of the current request (mock: read slot, record: write slot). */
     private static int $requestIndex = 0;
 
@@ -104,17 +135,21 @@ final class Cassette
 
         $runDir = rtrim($basePath, '/') . '/' . $name;
 
-        self::$mode         = $mode;
-        self::$cassettePath = $runDir . '/data.json';
-        self::$pointerPath  = $runDir . '/data.pointer';
-        self::$bucketDir    = $runDir . '/buckets';
-        self::$logPath      = $runDir . '/record.log';
-        self::$current      = [];
-        self::$heads        = [];
-        self::$consumed     = [];
-        self::$keyIndex     = [];
-        self::$requestIndex = 0;
-        self::$config       = [];
+        self::$mode               = $mode;
+        self::$cassettePath       = $runDir . '/data.json';
+        self::$pointerPath        = $runDir . '/data.pointer';
+        self::$bucketDir          = $runDir . '/buckets';
+        self::$logPath            = $runDir . '/record.log';
+        self::$current            = [];
+        self::$heads              = [];
+        self::$consumed           = [];
+        self::$keyIndex           = [];
+        self::$foreignKeyIndex    = [];
+        self::$foreignEntries     = [];
+        self::$foreignIndexBuilt  = false;
+        self::$bucketSkipped      = false;
+        self::$requestIndex       = 0;
+        self::$config             = [];
 
         if ($mode === self::MODE_RECORD) {
             // Atomically claim the next recording slot using a per-run counter file
@@ -286,6 +321,14 @@ final class Cassette
             return;
         }
 
+        // The HTTP recorder asked us to drop this request — typically because
+        // the response had an empty body (broken asset URL). Skip writing the
+        // bucket so it never lands on disk as an orphan.
+        if (self::$bucketSkipped) {
+            self::log('skipped bucket #' . self::$requestIndex . ' — request had empty body');
+            return;
+        }
+
         if (!is_dir(self::$bucketDir)) {
             mkdir(self::$bucketDir, 0775, true);
         }
@@ -336,9 +379,8 @@ final class Cassette
      * Record a completed external call into the current request bucket.
      *
      * Prefer recordSerialized() from hot paths — the hook has already paid the
-     * cost of serializing the return value (to force fresh non-interned string
-     * allocations) and can pass that string straight through, avoiding a
-     * redundant second serialize() here.
+     * serialize() cost on the captured return value and can pass that string
+     * straight through, avoiding a redundant second serialize() here.
      *
      * @param string $callable  e.g. "__::curl" or "db_fetch_row"
      * @param array  $args      Positional arguments passed to the callable.
@@ -352,10 +394,10 @@ final class Cassette
     /**
      * Record a call whose return value has already been PHP-serialized.
      *
-     * Halves the serialize cost in the record hot path: the hooks serialize
-     * once to produce a fresh object graph (via unserialize(serialize(...))
-     * — required to work around uopz's interned-string-pool corruption) and
-     * pass that same string directly as the tape entry.
+     * Halves the serialize cost in the record hot path: the hooks already
+     * round-trip the return value through serialize/unserialize to get a deep
+     * copy whose lifecycle is independent of uopz's internals; passing the
+     * intermediate serialized string straight here avoids a second serialize().
      *
      * @param string $callable           e.g. "__::curl" or "db_fetch_row"
      * @param array  $args               Positional arguments passed to the callable.
@@ -412,29 +454,57 @@ final class Cassette
                 return self::deserializeReturn($entries[$i]['return']);
             }
 
-            // No matching entry found — log and fall through to sequential.
-            error_log(
-                "Cassette WARNING: no arg-key match for '$callable' " .
-                    "key='$liveKey' (bucket " . self::$requestIndex . ') ' .
-                    '— falling back to sequential head.'
-            );
+            // --- Tier 2: cross-bucket fallback ----------------------------
+            // The current bucket has no matching key. Search the other buckets
+            // recorded for this run — recordings pre-dating the bucket-id
+            // embedding in http.json (and recordings made with concurrent FPM
+            // workers) can have bucket-index ↔ http-index drift, so the
+            // "right" entry may live in a neighbouring bucket. Foreign entries
+            // are indexed lazily and consumed independently from the current
+            // bucket's pool.
+            if (!self::$foreignIndexBuilt) {
+                self::buildForeignIndex();
+            }
+
+            $foreignIndices = self::$foreignKeyIndex[$callable][$liveKey] ?? [];
+            foreach ($foreignIndices as $i) {
+                if (isset(self::$consumed['__foreign__' . $callable][$i])) {
+                    continue;
+                }
+                self::$consumed['__foreign__' . $callable][$i] = true;
+                return self::deserializeReturn(self::$foreignEntries[$callable][$i]['return']);
+            }
+
+            // --- Tier 3: graceful empty fallback for query callables ------
+            // For DB query callables, return [] instead of an unrelated row.
+            // Empty maps cleanly to count=0 / first()=null / hasMany→empty,
+            // all safe degraded states. Falling through to sequential here
+            // would corrupt every subsequent matched lookup in the bucket.
+            $msg = "Cassette MISS: no entry for '$callable' " .
+                    "key='$liveKey' (bucket " . self::$requestIndex . ') — returning empty.';
+            self::log($msg);
+            if (self::isQueryCallable($callable)) {
+                return [];
+            }
         }
 
-        // --- Tier 2: sequential fallback ------------------------------------
-        // Consume the next unconsumed entry in recording order.
+        // --- Tier 4: sequential fallback ------------------------------------
+        // Last-resort fallback for non-query callables (e.g. __::curl) that
+        // skipped Tier 3's empty-array shortcut: consume the next unconsumed
+        // entry in recording order.
         $head = self::$heads[$callable] ?? 0;
         while ($head < count($entries) && isset(self::$consumed[$callable][$head])) {
             $head++;
         }
 
         if ($head >= count($entries)) {
-            error_log(
-                "Cassette WARNING: bucket exhausted for '$callable' at index $head " .
+            $msg = "Cassette WARNING: bucket exhausted for '$callable' at index $head " .
                     '(request #' . ($_SERVER['REQUEST_URI'] ?? 'CLI') . ' / bucket ' .
                     self::$requestIndex .
                     ') — returning null. ' .
-                    'Re-record the cassette if this causes unexpected behaviour.'
-            );
+                    'Re-record the cassette if this causes unexpected behaviour.';
+            error_log($msg);
+            self::log($msg);
             self::$heads[$callable] = $head;
             return null;
         }
@@ -453,6 +523,30 @@ final class Cassette
     public static function getMode(): string
     {
         return self::$mode;
+    }
+
+    /**
+     * Return the bucket index assigned to the current request.
+     *
+     * Used by CassetteHttpRecorder to embed the bucket index into the
+     * http.json entry so replay can pair each HTTP request with the exact
+     * bucket recorded for it — even when concurrent PHP-FPM workers caused
+     * bucket-claim order and http.json append order to diverge.
+     */
+    public static function getRequestIndex(): int
+    {
+        return self::$requestIndex;
+    }
+
+    /**
+     * Mark the current request's bucket as ignored — save() will become a
+     * no-op for this request. Called by the HTTP recorder when it decides
+     * not to persist the http.json entry (e.g. empty response body), so
+     * the on-disk recording stays free of orphan buckets.
+     */
+    public static function skipBucket(): void
+    {
+        self::$bucketSkipped = true;
     }
 
     /**
@@ -536,13 +630,72 @@ final class Cassette
      *
      * @param array $args Raw argument list (live call args or cassette-stored args).
      */
+    /**
+     * Lazy-load every bucket on disk except the current one and build a
+     * cross-bucket arg-key index. Called from mock() on the first cache miss
+     * so happy-path replays (no misses) stay on the fast per-bucket path.
+     */
+    private static function buildForeignIndex(): void
+    {
+        self::$foreignIndexBuilt = true;
+
+        if (!is_dir(self::$bucketDir)) {
+            return;
+        }
+
+        foreach (glob(self::$bucketDir . '/*.json.gz') ?: [] as $bucketFile) {
+            $idx = (int) basename($bucketFile, '.json.gz');
+            if ($idx === self::$requestIndex) {
+                continue;
+            }
+
+            $bucket = self::loadBucket($idx);
+            foreach ($bucket as $callable => $entries) {
+                $base = count(self::$foreignEntries[$callable] ?? []);
+                foreach ($entries as $entry) {
+                    self::$foreignEntries[$callable][] = $entry;
+                    $key = self::normalizeArgKey($entry['args']);
+                    if ($key !== null) {
+                        self::$foreignKeyIndex[$callable][$key][] = $base++;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * True when the callable name is a DB query whose natural empty result is
+     * an array of rows — used to decide whether a missing mock should
+     * gracefully return [] or fall through to the sequential fallback.
+     */
+    private static function isQueryCallable(string $callable): bool
+    {
+        // Connection::select / Connection::statement / Connection::affectingStatement
+        // and the legacy db_fetch_* / db_query helpers all expect array-of-rows
+        // shaped returns; an empty array is a safe degraded result.
+        return str_starts_with($callable, 'Connection::')
+            || str_starts_with($callable, 'db_');
+    }
+
     private static function normalizeArgKey(array $args): ?string
     {
         $first = $args[0] ?? null;
         if (!is_string($first) || trim($first) === '') {
             return null;
         }
-        return strtolower((string) preg_replace('/\s+/', ' ', trim($first)));
+        $sql = strtolower((string) preg_replace('/\s+/', ' ', trim($first)));
+
+        // Include the bindings array (Connection::select's $bindings parameter)
+        // in the key so calls with the same SQL but different parameter values
+        // get distinct lookup pools. Without this, e.g. 28 count() calls with
+        // different IDs all share one consumption queue, and any divergence in
+        // call order between record and replay scrambles which row each call
+        // receives — producing avalanche corruption across the whole bucket.
+        if (isset($args[1]) && is_array($args[1])) {
+            $sql .= '|' . md5((string) json_encode($args[1]));
+        }
+
+        return $sql;
     }
 
     /**
@@ -585,37 +738,4 @@ final class Cassette
         return unserialize((string) $raw);
     }
 
-    /**
-     * Strip null bytes from all string keys in arrays and stdClass objects.
-     *
-     * uopz can corrupt PHP interned strings when hooked closures execute in
-     * a substitute function scope — column names returned by PDO (e.g. "password")
-     * get extra null bytes and garbage memory appended to their key strings.
-     * Stripping everything from the first null byte onwards restores the
-     * original key name so attribute access works correctly in record mode.
-     */
-    public static function sanitizeResult(mixed $value): mixed
-    {
-        if (is_array($value)) {
-            $clean = [];
-            foreach ($value as $k => $v) {
-                $cleanKey = is_string($k)
-                    ? (strstr($k, "\0", before_needle: true) ?: $k)
-                    : $k;
-                $clean[$cleanKey] = self::sanitizeResult($v);
-            }
-            return $clean;
-        }
-
-        if ($value instanceof \stdClass) {
-            $clean = new \stdClass();
-            foreach ((array) $value as $k => $v) {
-                $cleanKey = strstr($k, "\0", before_needle: true) ?: $k;
-                $clean->$cleanKey = self::sanitizeResult($v);
-            }
-            return $clean;
-        }
-
-        return $value;
-    }
 }

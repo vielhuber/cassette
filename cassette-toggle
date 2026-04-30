@@ -296,10 +296,9 @@ inject_bootstrap_line() {
         ' "$file" > "$tmp"
     fi
 
-    sudo cp "$file" "$file.cassette-toggle.bak"
     sudo cp "$tmp" "$file"
     rm -f "$tmp"
-    ok "Injected bootstrap snippet into $file (backup at $file.cassette-toggle.bak)"
+    ok "Injected bootstrap snippet into $file"
 }
 
 remove_bootstrap_line() {
