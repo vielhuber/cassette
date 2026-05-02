@@ -54,7 +54,7 @@ export CASSETTE_ROOT=/var/www/my-project
 
 So `cd /var/www/my-project && vendor/bin/cassette record run_001` just works without any flags.
 
-**Toggle uopz and inject the bootstrap line** — `up`/`down` enable/disable uopz (incl. the PHP 8.5 patch), write/remove the `require_once` hook in `wp-config.php` (WordPress) or `public/index.php` (Laravel), and add `/.cassette/` to `.gitignore` on `up` (the entry stays on `down`):
+**Toggle uopz and inject the bootstrap line** — `up`/`down` enable/disable uopz (incl. the PHP 8.5 patch) and write/remove the `require_once` hook in `wp-config.php` (WordPress) or `public/index.php` (Laravel):
 
 ```bash
 ./cassette up   --php=8.5 --root=/var/www/my-project
@@ -67,8 +67,8 @@ So `cd /var/www/my-project && vendor/bin/cassette record run_001` just works wit
 
 | Command                                                                                             | Description                                                                           |
 | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `vendor/bin/cassette up [--php=<ver>]`                                                              | Enable uopz, install LD_PRELOAD shim (PHP 8.5), inject bootstrap line, update gitignore |
-| `vendor/bin/cassette down [--php=<ver>]`                                                            | Reverse `up` — disable uopz and remove bootstrap line (gitignore entry stays)         |
+| `vendor/bin/cassette up [--php=<ver>]`                                                              | Enable uopz, install LD_PRELOAD shim (PHP 8.5), inject bootstrap line                 |
+| `vendor/bin/cassette down [--php=<ver>]`                                                            | Reverse `up` — disable uopz and remove bootstrap line                                 |
 | `vendor/bin/cassette record <name>`                                                                 | Switch to record mode and clear old data — then click through the flow in the browser |
 | `vendor/bin/cassette stop <name>`                                                                   | Stop recording — further requests are no longer captured                              |
 | `vendor/bin/cassette replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]` | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
@@ -81,12 +81,13 @@ All commands accept `--root=<path>`. If omitted, `CASSETTE_ROOT` (env) is used, 
 
 Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
-All run data is stored in `.cassette/runs/<name>/`. By default `cassette up` adds `/.cassette/` to `.gitignore`, so recordings stay out of git. To track screenshot baselines, add a negation pattern after the ignore line:
+All run data is stored in `.cassette/runs/<name>/`. The directory is created on the first `vendor/bin/cassette` invocation with a self-contained `.cassette/.gitignore` that excludes everything (`*`), so recordings stay out of git without touching the project's own `.gitignore`. To track screenshot baselines, replace that file's contents with negation patterns:
 
 ```
-/.cassette/
-!/.cassette/runs/*/screenshots/
-!/.cassette/runs/*/screenshots/*
+*
+!runs/*/screenshots/
+!runs/*/screenshots/*
+!.gitignore
 ```
 
 ## Development workflow (working on cassette itself)

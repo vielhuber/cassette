@@ -18,10 +18,8 @@ declare(strict_types=1);
  *   5. With $projectRoot: detects WordPress (wp-config.php) or Laravel (public/index.php)
  *      and injects the cassette bootstrap line — wrapped in markers so the matching
  *      `down` invocation can remove it cleanly.
- *   6. With $projectRoot: ensures `/.cassette/` is in the project's .gitignore.
  *
- * `down` reverses every step except the .gitignore entry, which stays so the
- * directory remains ignored across toggle cycles.
+ * `down` reverses every step.
  */
 final class CassetteToggle
 {
@@ -29,7 +27,6 @@ final class CassetteToggle
     private const SHIM_SO      = '/usr/local/lib/uopz-php85-shim.so';
     private const MARKER_BEGIN = '// >>> cassette toggle (auto-managed) — do not edit';
     private const MARKER_END   = '// <<< cassette toggle';
-    private const GITIGNORE_ENTRY = '/.cassette/';
 
     public static function up(string $phpVersion, ?string $projectRoot): void
     {
@@ -51,7 +48,6 @@ final class CassetteToggle
 
         if ($projectRoot !== null) {
             self::injectBootstrapLine($projectRoot);
-            self::ensureGitignoreEntry($projectRoot);
         }
 
         self::ok("cassette enabled for PHP $phpVersion.");
@@ -354,39 +350,6 @@ final class CassetteToggle
 
         self::writeRoot($file, $contents);
         self::ok("Removed cassette toggle snippet from $file");
-    }
-
-    // -----------------------------------------------------------------------
-    // .gitignore
-    // -----------------------------------------------------------------------
-
-    private static function ensureGitignoreEntry(string $root): void
-    {
-        if (!is_dir("$root/.git")) {
-            // Not a git repo — silently skip.
-            return;
-        }
-
-        $gitignore = "$root/.gitignore";
-        $entry     = self::GITIGNORE_ENTRY;
-
-        $existing = is_file($gitignore) ? (string) file_get_contents($gitignore) : '';
-        $lines    = $existing === '' ? [] : (preg_split('/\r?\n/', $existing) ?: []);
-
-        // Treat several equivalent spellings as already-present.
-        $equivalents = ['/.cassette/', '/.cassette', '.cassette/', '.cassette'];
-        foreach ($lines as $line) {
-            if (in_array(trim($line), $equivalents, true)) {
-                self::ok("$entry already present in .gitignore — skipping.");
-                return;
-            }
-        }
-
-        $append = ($existing !== '' && !str_ends_with($existing, "\n")) ? "\n" : '';
-        $append .= $entry . "\n";
-
-        file_put_contents($gitignore, $existing . $append);
-        self::ok("Added $entry to .gitignore");
     }
 
     // -----------------------------------------------------------------------
