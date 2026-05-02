@@ -11,20 +11,54 @@ cassette hooks into your PHP application at the lowest level — intercepting da
 
 ## Installation
 
-```bash
-composer require --dev vielhuber/cassette
+### Production
+
+```sh
+cd /var/www/my-project
+composer require --dev vielhuber/cassette`
+./vendor/bin/...
 ```
+
+### Development
+
+```sh
+cd /var/www/cassette
+export CASSETTE_ROOT=/var/www/my-project
+```
+
+### Usage
+
+```sh
+./cassette up --php=8.5
+./cassette record run_001
+./cassette replay run_001 --http-only --screenshot-only
+./cassette delete run_001
+./cassette list
+./cassette down --php=8.5
+```
+
+<details>
+
+<summary>Notes</summary>
 
 **Requirements:**
 
 - PHP ≥ 8.3 with the [uopz](https://www.php.net/manual/en/book.uopz.php) extension
 - Node.js (for visual screenshot regression — installed automatically on first use)
 
-**Toggle uopz and inject the bootstrap line** — `cassette-toggle` enables/disables uopz (incl. the PHP 8.5 patch) and writes/removes the `require_once` hook in `wp-config.php` (WordPress) or `public/index.php` (Laravel):
+**Project root resolution.** Every command resolves the project root in this order:
+
+1. `--root=<path>` flag
+2. `CASSETTE_ROOT` environment variable
+3. Current working directory (default)
+
+So `cd /var/www/my-project && vendor/bin/cassette record run_001` just works without any flags.
+
+**Toggle uopz and inject the bootstrap line** — `up`/`down` enable/disable uopz (incl. the PHP 8.5 patch), write/remove the `require_once` hook in `wp-config.php` (WordPress) or `public/index.php` (Laravel), and add `/.cassette/` to `.gitignore` on `up` (the entry stays on `down`):
 
 ```bash
-./cassette-toggle start --php=8.5 --root=/var/www/my-project
-./cassette-toggle stop  --php=8.5 --root=/var/www/my-project
+./cassette up   --php=8.5 --root=/var/www/my-project
+./cassette down --php=8.5 --root=/var/www/my-project
 ```
 
 `.cassette/config.json` is created automatically on the first `vendor/bin/cassette record` call.
@@ -33,6 +67,8 @@ composer require --dev vielhuber/cassette
 
 | Command                                                                                             | Description                                                                           |
 | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `vendor/bin/cassette up [--php=<ver>]`                                                              | Enable uopz, install LD_PRELOAD shim (PHP 8.5), inject bootstrap line, update gitignore |
+| `vendor/bin/cassette down [--php=<ver>]`                                                            | Reverse `up` — disable uopz and remove bootstrap line (gitignore entry stays)         |
 | `vendor/bin/cassette record <name>`                                                                 | Switch to record mode and clear old data — then click through the flow in the browser |
 | `vendor/bin/cassette stop <name>`                                                                   | Stop recording — further requests are no longer captured                              |
 | `vendor/bin/cassette replay <name> [--refresh] [--base-url=<url>] [--http-only\|--screenshot-only]` | HTTP diff + visual screenshot comparison; `--refresh` recreates baselines             |
@@ -41,25 +77,34 @@ composer require --dev vielhuber/cassette
 | `vendor/bin/cassette delete --all`                                                                  | Delete all runs                                                                       |
 | `vendor/bin/cassette list`                                                                          | List all recorded runs with request count and screenshots                             |
 
+All commands accept `--root=<path>`. If omitted, `CASSETTE_ROOT` (env) is used, falling back to the current working directory.
+
 Exit code `0` = all green, `1` = deviations found. CI-compatible.
 
-All run data is stored in `.cassette/runs/<name>/`. Screenshot baselines are stored in `.cassette/runs/<name>/screenshots/` and should be committed to git.
-
-If runs should **not** be tracked in git at all, add the entire directory to `.gitignore`:
+All run data is stored in `.cassette/runs/<name>/`. By default `cassette up` adds `/.cassette/` to `.gitignore`, so recordings stay out of git. To track screenshot baselines, add a negation pattern after the ignore line:
 
 ```
 /.cassette/
+!/.cassette/runs/*/screenshots/
+!/.cassette/runs/*/screenshots/*
 ```
 
 ## Development workflow (working on cassette itself)
 
-When developing cassette alongside a project, you can run the CLI directly from the cassette source directory and point it at the target project via `--root`:
+When developing cassette alongside a project, you can run the CLI directly from the cassette source directory and point it at the target project — either via `CASSETTE_ROOT` or via `--root`:
 
 ```bash
 cd /var/www/cassette
+export CASSETTE_ROOT=/var/www/my-project
+./cassette record run_001
+./cassette stop   run_001
+./cassette replay run_001
+```
+
+Or with an explicit flag:
+
+```bash
 ./cassette record run_001 --root=/var/www/my-project
-./cassette stop   run_001 --root=/var/www/my-project
-./cassette replay run_001 --root=/var/www/my-project
 ```
 
 This way the target project's `composer.json` stays completely untouched — no path-repository, no `minimum-stability`, no symlinks. All cassette data is read from and written to `/var/www/my-project/.cassette/` as usual.
@@ -135,3 +180,5 @@ Create `.cassette/config.json` to customise recording and screenshot behaviour p
 | `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot (uses direct DOM manipulation, so `position: fixed` elements are reliably hidden)                                                    |
 | `screenshot.maskDates`         | `true`  | Automatically hide all date and time values in the page (ISO dates `2026-03-29`, German dates `29.03.2026`, times `12:34` / `12:34:56`) including `<input type="date">` values and plain text nodes |
 | `screenshot.waitAfterGoto`     | `0`     | Extra milliseconds to wait after `networkidle` before taking the screenshot — useful when JS-rendered content (e.g. lazy-loaded tables) needs extra time to paint after the network goes idle       |
+
+</details>

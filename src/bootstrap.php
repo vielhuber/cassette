@@ -128,6 +128,14 @@ declare(strict_types=1);
     }
     Cassette::setConfig($cassetteProjectConfig);
 
+    // Freeze "now" so date/time-derived SQL bindings match between recording
+    // and replay. Must run AFTER Cassette::load (needs the active mode + bucket
+    // for record/mock storage) and AFTER Composer autoloading (needs Carbon to
+    // resolve). Runs before hooks install so the very first Carbon::now()
+    // inside the app already sees the frozen time.
+    require_once __DIR__ . '/CassetteTime.php';
+    CassetteTime::start();
+
     // Install all uopz hooks (hooks read Cassette::getMode() at call time).
     require_once __DIR__ . '/CassetteHooks.php';
 

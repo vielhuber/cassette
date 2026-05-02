@@ -290,6 +290,18 @@ final class Cassette
      * Advance the request index pointer after each mock request so the
      * next request in the sequence uses its own isolated bucket.
      * Deleting the .pointer file restarts the sequence from request 0.
+     *
+     * Only advances when the pointer file still contains the value this
+     * worker's load() read at request start. When a replay controller
+     * (CassetteReplay.php / cassette.spec.js) has set the pointer explicitly
+     * to the NEXT request's bucket between when this worker started and when
+     * the shutdown handler fires, that value must NOT be overwritten with a
+     * sequential +1 — recordings with concurrent FPM workers produce
+     * non-sequential bucket indices, so the controller's targeted set is
+     * always more correct than a blind advance. The shutdown timing of the
+     * previous request is otherwise racy: the response is sent before the
+     * shutdown runs, so the next curl call can fire before this advance
+     * lands on disk.
      */
     public static function savePointer(): void
     {
@@ -297,10 +309,34 @@ final class Cassette
             return;
         }
 
-        file_put_contents(
-            self::$pointerPath,
-            json_encode(['_request_index' => self::$requestIndex + 1], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-        );
+        $fh = @fopen(self::$pointerPath, 'c+');
+        if ($fh === false) {
+            return;
+        }
+
+        try {
+            flock($fh, LOCK_EX);
+            $contents = stream_get_contents($fh);
+            $currentOnDisk = (int) (json_decode((string) $contents, true)['_request_index'] ?? -1);
+
+            // Pointer was changed by someone else (almost always the replay
+            // controller setting the next bucket explicitly) — leave it.
+            if ($currentOnDisk !== self::$requestIndex) {
+                return;
+            }
+
+            $next = json_encode(
+                ['_request_index' => self::$requestIndex + 1],
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE
+            );
+            rewind($fh);
+            ftruncate($fh, 0);
+            fwrite($fh, (string) $next);
+            fflush($fh);
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
+        }
     }
 
     /**

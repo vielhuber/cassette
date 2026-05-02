@@ -124,6 +124,16 @@ $cassetteBuiltinFunctions = [
 /** @var array<string, list<string>> */
 $cassetteBuiltinStaticMethods = [
     'vielhuber\stringhelper\__' => ['curl'],
+
+    // UUID generators — random per call, so the recording-time UUID would
+    // never match the replay-time UUID without hooks. Hooking them captures
+    // the exact UUID generated during recording; replay returns the same
+    // value, so any URL/payload that embeds the UUID (e.g. a 302 redirect
+    // to /resource/<uuid>) is identical record vs replay, and subsequent
+    // SELECT * WHERE id = <uuid> queries also hit a matching mock entry.
+    'Illuminate\Support\Str' => ['uuid', 'uuid7', 'orderedUuid'],
+    'Ramsey\Uuid\Uuid'       => ['uuid1', 'uuid4', 'uuid6', 'uuid7'],
+    'Symfony\Component\Uid\Uuid' => ['v1', 'v4', 'v6', 'v7'],
 ];
 
 /** @var array<string, list<string>> */
@@ -136,6 +146,20 @@ $cassetteBuiltinInstanceMethods = [
         'statement',
         'affectingStatement',
     ],
+    // Laravel session handlers — the active driver depends on session.php config,
+    // but all available handlers are hooked unconditionally; uopz silently skips
+    // ones whose class isn't loaded. Hooking read() in particular is what lets
+    // file-based sessions replay faithfully: without it the recording-time
+    // session file on disk is consumed by the recording itself (e.g. flash
+    // messages cleared after first display) so a replay reading the same file
+    // gets the post-consumption state. With the hook, each request's read
+    // returns the exact blob the handler returned at recording time.
+    'Illuminate\Session\FileSessionHandler'      => ['read', 'write', 'destroy'],
+    'Illuminate\Session\DatabaseSessionHandler'  => ['read', 'write', 'destroy'],
+    'Illuminate\Session\CookieSessionHandler'    => ['read', 'write', 'destroy'],
+    'Illuminate\Session\CacheBasedSessionHandler'=> ['read', 'write', 'destroy'],
+    'Illuminate\Session\ArraySessionHandler'     => ['read', 'write', 'destroy'],
+    'Illuminate\Session\NullSessionHandler'      => ['read', 'write', 'destroy'],
 ];
 
 // -----------------------------------------------------------------------

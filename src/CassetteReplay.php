@@ -426,6 +426,7 @@ function executeRequest(array $request, string $baseUrl, string $cookieJar, int 
  */
 function normalizeBody(string $body): string
 {
+
     // WordPress nonce values (10-char hex strings in hidden fields, JSON, and URL params).
     $body = preg_replace('/value="[0-9a-f]{10}"/', 'value="__NONCE__"', $body) ?? $body;
     $body = preg_replace('/"nonce"\s*:\s*"[0-9a-f]{10}"/', '"nonce":"__NONCE__"', $body) ?? $body;
@@ -439,14 +440,17 @@ function normalizeBody(string $body): string
     // (2026-03-24T17:10:41, 2026-03-24 17:10:41, 2026-03-31T11:10).
     $body = preg_replace('/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?/', '__TIMESTAMP__', $body) ?? $body;
 
-    // German date/time format (e.g. "26.03.2026 13:42" in page titles / "Stand" values).
-    $body = preg_replace('/\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}/', '__TIMESTAMP__', $body) ?? $body;
+    // German date/time format (e.g. "26.03.2026 13:42" or "26.03.26 13:42:08").
+    // Accepts both 4-digit (.2026) and 2-digit (.26) year variants — the latter
+    // restricted to "2x" so matches like "12.34.56" don't trigger. Seconds are
+    // optional so "01.05.26 12:34:08" doesn't leave a stray ":08" behind.
+    $body = preg_replace('/\d{2}\.\d{2}\.(?:\d{4}|2\d) \d{2}:\d{2}(?::\d{2})?/', '__TIMESTAMP__', $body) ?? $body;
 
     // ISO 8601 date only (2026-03-29)
     $body = preg_replace('/\b\d{4}-\d{2}-\d{2}\b/', '__DATE__', $body) ?? $body;
 
-    // German date only (29.03.2026)
-    $body = preg_replace('/\b\d{2}\.\d{2}\.\d{4}\b/', '__DATE__', $body) ?? $body;
+    // German date only — 4-digit (29.03.2026) or 2-digit (29.03.26) year.
+    $body = preg_replace('/\b\d{2}\.\d{2}\.(?:\d{4}|2\d)\b/', '__DATE__', $body) ?? $body;
 
     // Time only (12:34 or 12:34:56)
     $body = preg_replace('/\b\d{2}:\d{2}(:\d{2})?\b/', '__TIME__', $body) ?? $body;
@@ -464,11 +468,14 @@ function normalizeBody(string $body): string
     // every deploy so we mask them rather than diff against a stale value.
     $body = preg_replace('/\bv\d+(?:\.\d+)+\b/', '__VERSION__', $body) ?? $body;
 
-    // Generic duration values (e.g. "0.464s" in metainfo spans).
-    $body = preg_replace('/\b\d+[.,]\d+s\b/', '__DURATION__', $body) ?? $body;
+    // Generic duration values (e.g. "0.464s" in metainfo spans). Also match
+    // an optional leading minus — some apps compute durations as
+    // (LARAVEL_START - now) and occasionally produce negative values during
+    // replay when mocked I/O completes faster than the timing baseline.
+    $body = preg_replace('/-?\b\d+[.,]\d+s\b/', '__DURATION__', $body) ?? $body;
 
     // Uptime / runtime values in hours (e.g. "214,23h").
-    $body = preg_replace('/\b\d+[.,]\d+h\b/', '__UPTIME__', $body) ?? $body;
+    $body = preg_replace('/-?\b\d+[.,]\d+h\b/', '__UPTIME__', $body) ?? $body;
 
     // <input type="date"> values change daily (e.g. default = today).
     // Normalise value="YYYY-MM-DD" in any date input regardless of other attributes.

@@ -6,12 +6,19 @@ declare(strict_types=1);
  * Cassette CLI helper.
  *
  * Usage:
- *   vendor/bin/cassette record     <name> [--root=/path]  — switch to record mode and clear old cassette
- *   vendor/bin/cassette replay     <name> [--root=/path]  — switch to mock mode and run the replay suite
- *   vendor/bin/cassette accept     <name> [--root=/path]  — interactively accept HTTP diffs as new baseline
- *   vendor/bin/cassette stop       <name> [--root=/path]  — stop recording, keep data for later replay
- *   vendor/bin/cassette delete     <name> [--root=/path]  — delete a run and all its data
- *   vendor/bin/cassette list               [--root=/path]  — list all recorded runs
+ *   vendor/bin/cassette up         [--php=8.5] [--root=/path]  — enable uopz + inject bootstrap line
+ *   vendor/bin/cassette down       [--php=8.5] [--root=/path]  — disable uopz + remove bootstrap line
+ *   vendor/bin/cassette record     <name>     [--root=/path]   — switch to record mode and clear old cassette
+ *   vendor/bin/cassette replay     <name>     [--root=/path]   — switch to mock mode and run the replay suite
+ *   vendor/bin/cassette accept     <name>     [--root=/path]   — interactively accept HTTP diffs as new baseline
+ *   vendor/bin/cassette stop       <name>     [--root=/path]   — stop recording, keep data for later replay
+ *   vendor/bin/cassette delete     <name>     [--root=/path]   — delete a run and all its data
+ *   vendor/bin/cassette list                  [--root=/path]   — list all recorded runs
+ *
+ * Project root resolution (in priority order):
+ *   1. --root=<path>
+ *   2. CASSETTE_ROOT environment variable
+ *   3. Current working directory
  */
 
 // Allow exit()/die() to actually terminate the process even when the uopz extension
@@ -23,12 +30,14 @@ if (function_exists('uopz_allow_exit')) {
 $command = $argv[1] ?? '';
 $name    = $argv[2] ?? '';
 
-// Parse --root=<path> from any position in argv.
+// Parse --root=<path> and --php=<version> from any position in argv.
 $projectRootOverride = null;
+$phpVersionOverride  = null;
 foreach ($argv as $__arg) {
     if (str_starts_with($__arg, '--root=')) {
         $projectRootOverride = rtrim(substr($__arg, 7), '/');
-        break;
+    } elseif (str_starts_with($__arg, '--php=')) {
+        $phpVersionOverride = substr($__arg, 6);
     }
 }
 unset($__arg);
@@ -37,40 +46,33 @@ $nameRequired = in_array($command, ['record', 'replay', 'accept', 'stop', 'delet
 
 if ($command === '' || ($nameRequired && $name === '')) {
     echo "Usage:\n";
-    echo "  vendor/bin/cassette record  <name>                    — record a new flow\n";
-    echo "  vendor/bin/cassette replay  <name> [options]          — HTTP diff + visual screenshot regression\n";
+    echo "  vendor/bin/cassette up      [--php=<ver>]               — enable uopz + inject bootstrap line\n";
+    echo "  vendor/bin/cassette down    [--php=<ver>]               — disable uopz + remove bootstrap line\n";
+    echo "  vendor/bin/cassette record  <name>                      — record a new flow\n";
+    echo "  vendor/bin/cassette replay  <name> [options]            — HTTP diff + visual screenshot regression\n";
     echo "                                options: --refresh, --debug, --http-only,\n";
     echo "                                         --screenshot-only, --base-url=<url>\n";
-    echo "  vendor/bin/cassette accept  <name>                    — interactively accept HTTP diffs as new baseline\n";
-    echo "  vendor/bin/cassette stop    <name>                    — stop recording, keep data for later replay\n";
-    echo "  vendor/bin/cassette delete  <name> [--force]          — delete a run and all its data\n";
-    echo "  vendor/bin/cassette delete  --all [--force]           — delete all runs\n";
-    echo "  vendor/bin/cassette list                              — list all recorded runs\n";
+    echo "  vendor/bin/cassette accept  <name>                      — interactively accept HTTP diffs as new baseline\n";
+    echo "  vendor/bin/cassette stop    <name>                      — stop recording, keep data for later replay\n";
+    echo "  vendor/bin/cassette delete  <name> [--force]            — delete a run and all its data\n";
+    echo "  vendor/bin/cassette delete  --all [--force]             — delete all runs\n";
+    echo "  vendor/bin/cassette list                                — list all recorded runs\n";
     echo "\n";
-    echo "  --root=<path>                                         — override auto-detected project root\n";
+    echo "Project root resolution (priority order):\n";
+    echo "  --root=<path>                                           — explicit override\n";
+    echo "  CASSETTE_ROOT environment variable\n";
+    echo "  Current working directory (default)\n";
     exit(1);
 }
 
-// Locate project root without resolving symlinks so that path-repository installs work.
-// vendor/bin/<script> is always two directory levels below the project root.
-$__rawInvocation = $argv[0];
-if (!str_starts_with($__rawInvocation, '/')) {
-    $__rawInvocation = (getcwd() ?: '.') . '/' . $__rawInvocation;
-}
-$__parts = explode('/', $__rawInvocation);
-$__segments = [];
-foreach ($__parts as $__part) {
-    if ($__part === '' || $__part === '.') { continue; }
-    if ($__part === '..') { array_pop($__segments); continue; }
-    $__segments[] = $__part;
-}
-// vendor/bin/<script> — remove last 3 path segments to reach project root.
-$projectRoot = $projectRootOverride ?? ('/' . implode('/', array_slice($__segments, 0, -3)));
-unset($__rawInvocation, $__parts, $__segments, $__part);
+// Resolve project root: --root > CASSETTE_ROOT env > getcwd().
+$envRoot     = (string) (getenv('CASSETTE_ROOT') ?: '');
+$projectRoot = $projectRootOverride
+    ?? ($envRoot !== '' ? rtrim($envRoot, '/') : (string) getcwd());
 
 if (!is_dir($projectRoot)) {
     fwrite(STDERR, "Error: project root does not exist: $projectRoot\n");
-    fwrite(STDERR, "Use --root=/path/to/your/project to specify the correct path.\n");
+    fwrite(STDERR, "Pass --root=<path>, set CASSETTE_ROOT, or run from inside the project.\n");
     exit(1);
 }
 
@@ -97,6 +99,17 @@ $config = file_exists($configPath)
     : [];
 
 switch ($command) {
+    case 'up':
+    case 'down':
+        require_once __DIR__ . '/src/CassetteToggle.php';
+        $phpVersion = CassetteToggle::resolvePhpVersion($phpVersionOverride, __DIR__);
+        if ($command === 'up') {
+            CassetteToggle::up($phpVersion, $projectRoot);
+        } else {
+            CassetteToggle::down($phpVersion, $projectRoot);
+        }
+        break;
+
     case 'record':
         // Delete existing cassette files so a clean recording starts.
         // data.counter must also be removed — otherwise the previous run's
@@ -123,6 +136,30 @@ switch ($command) {
         if (is_dir($bucketsDir)) {
             foreach (glob($bucketsDir . '/*.json.gz') ?: [] as $old) {
                 unlink($old);
+            }
+        }
+
+        // screenshots/ holds Playwright baselines tied to the previous flow.
+        // A fresh recording almost always renders different content (different
+        // pages visited, different cookie state, different URLs) so the old
+        // baselines would mismatch the new replay and fail with confusing
+        // "screenshot did not stabilize" timeouts (toHaveScreenshot retries
+        // until it gives up). Wipe them so the next replay creates new ones.
+        $screenshotsDir = $cassettesDir . '/' . $name . '/screenshots';
+        if (is_dir($screenshotsDir)) {
+            foreach (glob($screenshotsDir . '/*.png') ?: [] as $old) {
+                unlink($old);
+            }
+        }
+
+        // http/ holds .diff and .actual files from previous failed replays —
+        // stale once the recording changes. Wipe them too.
+        $httpDir = $cassettesDir . '/' . $name . '/http';
+        if (is_dir($httpDir)) {
+            foreach (glob($httpDir . '/*') ?: [] as $old) {
+                if (is_file($old)) {
+                    unlink($old);
+                }
             }
         }
 
@@ -356,7 +393,7 @@ switch ($command) {
                 static fn(string $entry): bool =>
                     $entry !== '.' && $entry !== '..' &&
                     is_dir($cassettesDir . '/' . $entry) &&
-                    file_exists($cassettesDir . '/' . $entry . '/data.json')
+                    file_exists($cassettesDir . '/' . $entry . '/http.json')
             );
 
             if (empty($runs)) {
@@ -417,7 +454,7 @@ switch ($command) {
             static fn(string $entry): bool =>
                 $entry !== '.' && $entry !== '..' &&
                 is_dir($cassettesDir . '/' . $entry) &&
-                file_exists($cassettesDir . '/' . $entry . '/data.json')
+                file_exists($cassettesDir . '/' . $entry . '/http.json')
         );
 
         if (empty($runs)) {
@@ -449,7 +486,7 @@ switch ($command) {
 
     default:
         fwrite(STDERR, "\033[31m⛔ Unknown command: $command\033[0m\n");
-        fwrite(STDERR, "Valid commands: record, replay, accept, stop, delete, list\n");
+        fwrite(STDERR, "Valid commands: up, down, record, replay, accept, stop, delete, list\n");
         exit(1);
 }
 

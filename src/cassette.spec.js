@@ -248,17 +248,19 @@ test(cassetteName, async ({ page }) => {
             // They will be unrouted at the start of the next loop iteration.
             previousHandlers = currentHandlers;
 
-            // Force the pointer to the expected index before each step.
-            // Background browser requests (timers, polling, delayed AJAX) can advance
-            // the pointer during the previous step's waitAfterGoto / screenshot phase.
-            // Resetting here ensures the server always reads the correct cassette bucket.
+            // Force the pointer to the recorded bucket before each step. Use the
+            // embedded `bucket` field (added by CassetteHttpRecorder) so requests
+            // recorded with bucket-index ≠ http-index — e.g. concurrent FPM
+            // workers produced bucket gaps — still load their actual bucket.
+            // Falls back to the loop index for legacy recordings.
+            const bucketIndex = entry.bucket ?? index;
             const pointerRaw =
                 debug && fs.existsSync(pointerPath)
                     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
                     : null;
-            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: index }));
-            if (debug && pointerRaw !== null && pointerRaw !== index) {
-                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRaw}, reset to ${index})`);
+            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: bucketIndex }));
+            if (debug && pointerRaw !== null && pointerRaw !== bucketIndex) {
+                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRaw}, reset to ${bucketIndex})`);
             }
 
             // Non-HTML responses (JSON, plain-text etc.) are AJAX endpoints.
@@ -327,9 +329,11 @@ test(cassetteName, async ({ page }) => {
             // Disable via maskDates: false in .cassette/config.json.
             if (maskDates) {
                 await page.evaluate(() => {
-                    // Matches: ISO date (2026-03-29), German date (29.03.2026), time (12:34 or 12:34:56),
-                    // runtime seconds (0.52s or 0,52s as used in footer render-time display)
-                    const PATTERN = /\b(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4}|\d{1,2}:\d{2}(?::\d{2})?|\d+[.,]\d+s)\b/g;
+                    // Matches: ISO date (2026-03-29), German date (29.03.2026 or 29.03.26),
+                    // time (12:34 or 12:34:56), runtime seconds (0.52s or 0,52s as used
+                    // in footer render-time display). 2-digit year is restricted to "2x"
+                    // to avoid matching version numbers like "12.34.56".
+                    const PATTERN = /\b(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.(?:\d{4}|2\d)|\d{1,2}:\d{2}(?::\d{2})?|\d+[.,]\d+s)\b/g;
 
                     // Hide input[type="date"] value displays
                     document.querySelectorAll('input[type="date"]').forEach((el) => {
@@ -439,16 +443,18 @@ test(cassetteName, async ({ page }) => {
                 throw new Error('screenshot diff');
             }
         } else {
-            // Force the pointer to the expected index before each POST step.
+            // Force the pointer to the recorded bucket before each POST step.
+            // See GET branch for why entry.bucket is preferred over index.
+            const bucketIndexPost = entry.bucket ?? index;
             const pointerRawPost =
                 debug && fs.existsSync(pointerPath)
                     ? JSON.parse(fs.readFileSync(pointerPath, 'utf8'))._request_index
                     : null;
-            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: index }));
-            if (debug && pointerRawPost !== null && pointerRawPost !== index) {
-                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRawPost}, reset to ${index})`);
+            fs.writeFileSync(pointerPath, JSON.stringify({ _request_index: bucketIndexPost }));
+            if (debug && pointerRawPost !== null && pointerRawPost !== bucketIndexPost) {
+                dbg(`\n[step ${index}] NOTE: pointer drift detected (was ${pointerRawPost}, reset to ${bucketIndexPost})`);
             }
-            dbg(`\n[step ${index}] POST ${url} | pointer=${index} (forced)`);
+            dbg(`\n[step ${index}] POST ${url} | pointer=${bucketIndexPost} (forced)`);
 
             // POST: replay via the page context so the session cookie jar is shared.
             // No screenshot — the only purpose is to advance the server's mock pointer.
