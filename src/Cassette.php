@@ -371,13 +371,19 @@ final class Cassette
 
         $bucketFile = self::$bucketDir . '/' . self::$requestIndex . '.json.gz';
 
-        file_put_contents(
-            $bucketFile,
-            gzencode(
-                (string) json_encode(self::$current, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                1
-            )
-        );
+        $encoded = json_encode(self::$current, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($encoded === false) {
+            // Don't silently wipe the bucket — emit a loud warning that the
+            // intercepted calls won't be replayable so the cause (usually a
+            // hooked function whose return contains non-base64-wrapped binary
+            // bytes) gets noticed immediately instead of much later via diff.
+            $err = json_last_error_msg();
+            self::log("ERROR: json_encode failed for bucket #" . self::$requestIndex . " — $err. Bucket NOT written.");
+            error_log("Cassette ERROR: json_encode failed for bucket #" . self::$requestIndex . " — $err");
+            return;
+        }
+
+        file_put_contents($bucketFile, gzencode($encoded, 1));
 
         $callableCount = array_sum(array_map('count', self::$current));
         self::log('saved bucket #' . self::$requestIndex . " — $callableCount intercepted call(s)");
@@ -424,7 +430,7 @@ final class Cassette
      */
     public static function record(string $callable, array $args, mixed $return): void
     {
-        self::recordSerialized($callable, $args, self::serializeReturn($return));
+        self::recordSerialized($callable, $args, serialize($return));
     }
 
     /**
@@ -435,15 +441,19 @@ final class Cassette
      * copy whose lifecycle is independent of uopz's internals; passing the
      * intermediate serialized string straight here avoids a second serialize().
      *
+     * The serialized string is wrapped as base64 here (not at the call site)
+     * so all paths — `record()`, hook closures, CassetteTime, etc. — share
+     * one canonical disk format.
+     *
      * @param string $callable           e.g. "__::curl" or "db_fetch_row"
      * @param array  $args               Positional arguments passed to the callable.
-     * @param string $serializedReturn   Already-serialized return value.
+     * @param string $serializedReturn   Already-serialized return value (raw, will be base64-wrapped).
      */
     public static function recordSerialized(string $callable, array $args, string $serializedReturn): void
     {
         self::$current[$callable][] = [
             'args'   => self::serializeArgs($args),
-            'return' => $serializedReturn
+            'return' => self::BASE64_RETURN_PREFIX . base64_encode($serializedReturn),
         ];
     }
 
@@ -713,25 +723,83 @@ final class Cassette
             || str_starts_with($callable, 'db_');
     }
 
+    /**
+     * Return true when the current bucket (or any foreign bucket) holds an
+     * unconsumed entry whose normalised arg-key matches $args.
+     *
+     * Used by hooks that want to fall through to the real implementation when
+     * the cassette has nothing to serve — e.g. filesystem reads where a `null`
+     * mock return would be a wrong answer (file_exists must be bool) and
+     * existing recordings may pre-date the hook (so calls miss legitimately).
+     */
+    public static function hasArgKeyMatch(string $callable, array $args): bool
+    {
+        $liveKey = self::normalizeArgKey($args);
+        if ($liveKey === null) {
+            return false;
+        }
+
+        foreach (self::$keyIndex[$callable][$liveKey] ?? [] as $i) {
+            if (!isset(self::$consumed[$callable][$i])) {
+                return true;
+            }
+        }
+
+        if (!self::$foreignIndexBuilt) {
+            self::buildForeignIndex();
+        }
+        foreach (self::$foreignKeyIndex[$callable][$liveKey] ?? [] as $i) {
+            if (!isset(self::$consumed['__foreign__' . $callable][$i])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static function normalizeArgKey(array $args): ?string
     {
+        // No args at all — single-pool key. Calls cluster here and are served
+        // sequentially within the pool. Without a stable key these would fall
+        // through to Tier-4 anyway, but pinning the key lets the caller still
+        // distinguish "no args" from "different non-string args".
+        if ($args === []) {
+            return '__noargs__';
+        }
+
         $first = $args[0] ?? null;
-        if (!is_string($first) || trim($first) === '') {
-            return null;
-        }
-        $sql = strtolower((string) preg_replace('/\s+/', ' ', trim($first)));
 
-        // Include the bindings array (Connection::select's $bindings parameter)
-        // in the key so calls with the same SQL but different parameter values
-        // get distinct lookup pools. Without this, e.g. 28 count() calls with
-        // different IDs all share one consumption queue, and any divergence in
-        // call order between record and replay scrambles which row each call
-        // receives — producing avalanche corruption across the whole bucket.
-        if (isset($args[1]) && is_array($args[1])) {
-            $sql .= '|' . md5((string) json_encode($args[1]));
+        // Backwards-compatible SQL/URL normalisation for string-first args:
+        // trim, collapse whitespace, lowercase. The recorded SQL string may
+        // be reformatted by the time it reappears at replay (e.g. PDO driver
+        // re-emits whitespace), so this loose match keeps the cassette
+        // resilient.
+        if (is_string($first) && trim($first) !== '') {
+            $sql = strtolower((string) preg_replace('/\s+/', ' ', trim($first)));
+
+            // Include the bindings array (Connection::select's $bindings
+            // parameter) in the key so calls with the same SQL but different
+            // parameter values get distinct lookup pools. Without this, e.g.
+            // 28 count() calls with different IDs all share one consumption
+            // queue, and any divergence in call order between record and
+            // replay scrambles which row each call receives.
+            if (isset($args[1]) && is_array($args[1])) {
+                $sql .= '|' . md5((string) json_encode($args[1]));
+            }
+
+            return $sql;
         }
 
-        return $sql;
+        // Non-string-first args (random_bytes(16), random_int(1,100), …):
+        // previously returned null and fell through to Tier-4 sequential,
+        // which mixed pools when the same callable was invoked with
+        // *different* args — e.g. recording random_bytes(16), random_bytes(10),
+        // random_bytes(16) then replaying two random_bytes(16) calls would
+        // hand the second one the 10-byte entry and Laravel's Encrypter
+        // would crash with "IV is only 10 bytes long, expects 16". Hashing
+        // the full args list gives every distinct call signature its own
+        // pool with deterministic sequential consumption inside the pool.
+        return md5(serialize($args));
     }
 
     /**
@@ -756,22 +824,26 @@ final class Cassette
     }
 
     /**
-     * Serialize a return value to a PHP serialized string.
-     *
-     * serialize() preserves the complete structure: arrays stay arrays,
-     * stdClass stays stdClass, named classes stay named classes.
+     * Marker prefix for base64-encoded serialized returns. Anything else is
+     * treated as a legacy raw serialize() string. Picked to be invalid as the
+     * leading bytes of a PHP serialize stream (which always starts with one
+     * of [aiboCNsdr]:), so accidental collisions are impossible.
      */
-    private static function serializeReturn(mixed $return): string
-    {
-        return serialize($return);
-    }
+    private const BASE64_RETURN_PREFIX = 'B64:';
 
     /**
-     * Reconstruct the original return value from a PHP serialized string.
+     * Reconstruct the original return value. Recognises the base64 wrapper
+     * (BASE64_RETURN_PREFIX + base64) for current recordings; falls back to
+     * raw unserialize() so older cassettes still replay.
      */
     private static function deserializeReturn(mixed $raw): mixed
     {
-        return unserialize((string) $raw);
+        $raw = (string) $raw;
+        if (str_starts_with($raw, self::BASE64_RETURN_PREFIX)) {
+            $decoded = base64_decode(substr($raw, strlen(self::BASE64_RETURN_PREFIX)), true);
+            return $decoded === false ? null : unserialize($decoded);
+        }
+        return unserialize($raw);
     }
 
 }

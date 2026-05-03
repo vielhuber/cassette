@@ -180,6 +180,7 @@ Create `.cassette/config.json` to customise recording and screenshot behaviour p
 | `screenshot.maxDiffPixelRatio` | `0.01`  | Maximum allowed pixel difference ratio (0–1)                                                                                                                                                        |
 | `screenshot.maskSelectors`     | `[]`    | CSS selectors whose elements are hidden before each screenshot (uses direct DOM manipulation, so `position: fixed` elements are reliably hidden)                                                    |
 | `screenshot.maskDates`         | `true`  | Automatically hide all date and time values in the page (ISO dates `2026-03-29`, German dates `29.03.2026`, times `12:34` / `12:34:56`) including `<input type="date">` values and plain text nodes |
-| `screenshot.waitAfterGoto`     | `0`     | Extra milliseconds to wait after `networkidle` before taking the screenshot — useful when JS-rendered content (e.g. lazy-loaded tables) needs extra time to paint after the network goes idle       |
+| `screenshot.waitAfterGoto`     | `0`     | Extra milliseconds to wait after `networkidle` before taking the screenshot. Used as a fixed wait by default, or as a ceiling when `domStableMs > 0`                                                                                            |
+| `screenshot.domStableMs`       | `0`     | Opt-in early-exit. When set > 0, the wait exits early once the DOM signature (HTML length + scrollHeight) has been stable for this many consecutive milliseconds, capped at `waitAfterGoto`. Skips signature-only changes (CSS animations, image decoding) — leave at `0` for pages with rich client-side interactivity |
 
 </details>

@@ -128,16 +128,48 @@ declare(strict_types=1);
     }
     Cassette::setConfig($cassetteProjectConfig);
 
-    // Freeze "now" so date/time-derived SQL bindings match between recording
-    // and replay. Must run AFTER Cassette::load (needs the active mode + bucket
-    // for record/mock storage) and AFTER Composer autoloading (needs Carbon to
-    // resolve). Runs before hooks install so the very first Carbon::now()
-    // inside the app already sees the frozen time.
-    require_once __DIR__ . '/CassetteTime.php';
-    CassetteTime::start();
+    // -------------------------------------------------------------------
+    // Domain-extension hooks
+    // -------------------------------------------------------------------
+    //
+    // Each entry is a static class with a `start()` method that installs its
+    // own uopz hooks (and/or persists a snapshot via Cassette::recordSerialized
+    // / reads it back via Cassette::mock). Order matters:
+    //
+    //   - PRE_HOOK extensions run BEFORE generic CassetteHooks.php so any
+    //     uopz hook they install is visible to the very first relevant call
+    //     (e.g. CassetteTime freezes Carbon::now before the app boots).
+    //   - POST_HOOK extensions run AFTER CassetteHooks.php — useful when the
+    //     extension depends on a hook installed there.
+    //
+    // To add a new domain hook:
+    //   1. Create src/CassetteFoo.php with `final class CassetteFoo` and a
+    //      static `start(): void` method.
+    //   2. Append the bare class name to the relevant array below.
+    //
+    // For simple per-call function/method record/mock without custom logic,
+    // just append to $cassetteBuiltinFunctions / $cassetteBuiltinStaticMethods
+    // / $cassetteBuiltinInstanceMethods inside CassetteHooks.php — or use the
+    // user-facing `hooks` key in .cassette/config.json (no PHP edits needed).
+    $cassetteExtensionsPreHooks = [
+        'CassetteTime',         // freeze now() + native date/time fns + DateTime ctor
+    ];
+    $cassetteExtensionsPostHooks = [
+        'CassetteObjectHash',   // deterministic spl_object_hash / spl_object_id
+    ];
+
+    foreach ($cassetteExtensionsPreHooks as $cassetteExt) {
+        require_once __DIR__ . '/' . $cassetteExt . '.php';
+        $cassetteExt::start();
+    }
 
     // Install all uopz hooks (hooks read Cassette::getMode() at call time).
     require_once __DIR__ . '/CassetteHooks.php';
+
+    foreach ($cassetteExtensionsPostHooks as $cassetteExt) {
+        require_once __DIR__ . '/' . $cassetteExt . '.php';
+        $cassetteExt::start();
+    }
 
     // In record mode: capture the full HTTP request/response pair so CassetteReplay.php
     // can compare actual responses against recorded ones later.

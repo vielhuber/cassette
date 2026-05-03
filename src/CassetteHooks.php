@@ -109,6 +109,7 @@ if (!extension_loaded('uopz')) {
 
 /** @var list<string> */
 $cassetteBuiltinFunctions = [
+    // ── Database (in-house wrapper) ──────────────────────────────────────
     'db_fetch_var',
     'db_fetch_row',
     'db_fetch_col',
@@ -119,6 +120,112 @@ $cassetteBuiltinFunctions = [
     'db_delete',
     'db_count',
     'db_last_insert_id',
+
+    // ── Randomness ───────────────────────────────────────────────────────
+    // Each call returns a different value, so two consecutive random_bytes(16)
+    // calls produce two distinct entries with the same arg-key '[16]'. The
+    // 4-tier mock matcher serves them in recording order (Tier 1 within the
+    // matching arg-key group is sequential).
+    'rand',
+    'mt_rand',
+    'random_bytes',
+    'random_int',
+
+    // ── Environment / process identity ───────────────────────────────────
+    // getenv() with no args returns the full env array (one big entry); with
+    // a key it returns a single string|false (one entry per distinct key).
+    // Direct $_ENV / $_SERVER reads are NOT covered: Cassette's bootstrap
+    // runs before Laravel's Dotenv populates them, so a snapshot here would
+    // capture pre-Dotenv state. Apps that read env vars via getenv() (the
+    // recommended Laravel idiom) are fully covered.
+    'getenv',
+    'gethostname',
+    'gethostbyname',
+    'getmypid',
+    'posix_getpid',
+];
+
+/**
+ * Filesystem read functions — captured at recording time so replay reproduces
+ * the exact state, even when the underlying file was later deleted, modified
+ * or moved during the same recording (e.g. user deletes a PDF halfway through
+ * the flow; earlier requests reading that file still need to see the original
+ * content on replay).
+ *
+ * Installed via a dedicated hook (installFilesystemFunctionHook) that bypasses
+ * any path under `.cassette/` so Cassette's own bucket reads do not recurse
+ * into the hook (which would call Cassette::mock() → file_get_contents() →
+ * hook → Cassette::mock() → infinite loop).
+ *
+ * @var list<string>
+ */
+// Each entry is either a bare function name (path is args[0]) or a
+// "function:argIndex" pair when the path argument isn't first — e.g.
+// hash_file($algo, $filename) puts the path at index 1.
+$cassetteBuiltinFilesystemFunctions = [
+    // Content
+    'file_get_contents',
+    'file',                 // returns array of lines
+    // Existence / metadata
+    'file_exists',
+    'is_file',
+    'is_dir',
+    'is_readable',
+    'filesize',
+    'filemtime',
+    'filectime',
+    'fileatime',
+    'fileperms',
+    'fileowner',
+    'filegroup',
+    'fileinode',
+    'filetype',
+    'realpath',
+    'stat',
+    'lstat',
+    // Listings
+    'glob',
+    'scandir',
+    // Hashing / MIME / image
+    'md5_file',
+    'sha1_file',
+    'hash_file:1',          // hash_file($algo, $filename, …)
+    'crc32_file',
+    'mime_content_type',
+    'getimagesize',
+    // Disk-level
+    'disk_free_space',
+    'disk_total_space',
+];
+
+/**
+ * Filesystem write/delete functions — captured during RECORD; on MOCK the
+ * recorded return is served without performing the real side effect.
+ *
+ * This is what stops a replay from re-deleting (or re-creating, re-touching)
+ * files after the recording's original side effect already mutated them.
+ * Critical example: deleting an attorney unlinks the associated PDF during
+ * recording — replay must return the recorded `true` instead of unlinking
+ * the (already gone) file again, which would otherwise raise "No such file".
+ *
+ * Like the read variants, these go through installFilesystemFunctionHook so
+ * paths under `/.cassette/` bypass the hook (Cassette itself writes buckets,
+ * the pointer file, logs, etc. via these very functions).
+ *
+ * Unlike reads, NO fall-through to the real function on a mock miss: replay
+ * must never mutate the disk, so a missing entry returns null/false instead.
+ *
+ * @var list<string>
+ */
+$cassetteBuiltinFilesystemWriteFunctions = [
+    'unlink',
+    'file_put_contents',
+    'mkdir',
+    'rmdir',
+    'rename',
+    'copy',
+    'touch',
+    'chmod',
 ];
 
 /** @var array<string, list<string>> */
@@ -199,6 +306,67 @@ function installFunctionHook(string $fn): void
                 // through the same data path as replay (where mock() returns
                 // unserialize($entry['return'])). Keeps the value seen by the
                 // caller identical between record and replay runs.
+                $serialized = serialize($result);
+                $result     = unserialize($serialized);
+                Cassette::recordSerialized($fn, $args, $serialized);
+                return $result;
+            }
+
+            throw new \LogicException("Cassette $fn hook fired without active cassette mode.");
+        },
+        true
+    );
+}
+
+/**
+ * Install a uopz hook for a filesystem function (read or write).
+ *
+ * Two key differences from installFunctionHook:
+ *
+ *   1. Any call whose first argument contains `/.cassette/` bypasses the hook
+ *      and runs the original. Cassette itself reads buckets and writes the
+ *      pointer/log/bucket files via these very functions — without the bypass
+ *      a hook would re-enter Cassette::mock() / save() and recurse forever.
+ *
+ *   2. $fallThrough controls miss behaviour in MOCK mode:
+ *        - true  (default, used for reads): on no arg-key match, call the
+ *          original. Required because file_exists() must return bool — a
+ *          `null` from an exhausted bucket breaks autoloader probes — and
+ *          because old recordings that pre-date the hook never captured the
+ *          call.
+ *        - false (used for writes): on a miss, return null. Replay MUST NEVER
+ *          mutate the disk, so unlink/file_put_contents/… can't fall through.
+ */
+function installFilesystemFunctionHook(string $fn, bool $fallThrough = true, int $pathArgIndex = 0): void
+{
+    Cassette::log("INSTALL filesystem function hook $fn (pathArg=$pathArgIndex, fallThrough=" . ($fallThrough ? 'yes' : 'no') . ')');
+
+    uopz_set_return(
+        $fn,
+        static function () use ($fn, $fallThrough, $pathArgIndex) {
+            $args = func_get_args();
+            $path = (string) ($args[$pathArgIndex] ?? '');
+
+            static $original = null;
+            if ($original === null) {
+                $original = Closure::fromCallable($fn);
+            }
+
+            if (str_contains($path, '/.cassette/')) {
+                return $original(...$args);
+            }
+
+            $mode = Cassette::getMode();
+
+            if ($mode === Cassette::MODE_MOCK) {
+                if ($fallThrough && !Cassette::hasArgKeyMatch($fn, $args)) {
+                    return $original(...$args);
+                }
+                return Cassette::mock($fn, $args);
+            }
+
+            if ($mode === Cassette::MODE_RECORD) {
+                $result     = $original(...$args);
                 $serialized = serialize($result);
                 $result     = unserialize($serialized);
                 Cassette::recordSerialized($fn, $args, $serialized);
@@ -339,6 +507,18 @@ foreach ($cassetteAllInstanceMethods as $class => $methods) {
 
 foreach ($cassetteAllFunctions as $fn) {
     installFunctionHook((string) $fn);
+}
+
+// Each entry is "name" or "name:argIndex" — split and dispatch.
+foreach ($cassetteBuiltinFilesystemFunctions as $entry) {
+    [$fn, $argIdx] = str_contains((string) $entry, ':')
+        ? [explode(':', (string) $entry)[0], (int) explode(':', (string) $entry)[1]]
+        : [(string) $entry, 0];
+    installFilesystemFunctionHook($fn, fallThrough: true, pathArgIndex: $argIdx);
+}
+
+foreach ($cassetteBuiltinFilesystemWriteFunctions as $fn) {
+    installFilesystemFunctionHook((string) $fn, fallThrough: false);
 }
 
 foreach ($cassetteAllStaticMethods as $class => $methods) {

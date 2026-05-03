@@ -31,8 +31,46 @@ const maxDiffPixelRatio = screenshotConfig.maxDiffPixelRatio ?? 0.01;
 const maskSelectors = screenshotConfig.maskSelectors ?? [];
 const maskDates = screenshotConfig.maskDates ?? true;
 const timeout = screenshotConfig.timeout ?? 30000;
-// Extra wait after networkidle to give JS-rendered content (lazy-loaded tables etc.) time to paint.
+// Extra wait after networkidle. Used in two modes:
+//   - domStableMs == 0 (default):  FIXED wait of exactly waitAfterGoto ms.
+//   - domStableMs >  0:            CEILING for the smart wait; the actual
+//                                  wait exits early once the DOM signature
+//                                  has been stable for domStableMs ms.
+// The smart mode is opt-in because DOM-signature stability does not catch
+// CSS animations or in-flight image loads — pages that look "settled" by
+// HTML can still produce pixel drift, leaving toHaveScreenshot() to time
+// out while polling for visual stability.
 const waitAfterGoto = screenshotConfig.waitAfterGoto ?? 0;
+const domStableMs = screenshotConfig.domStableMs ?? 0;
+
+/**
+ * Wait until the DOM stops changing for `stableMs` consecutive ms, capped at
+ * `maxMs`. Signature is body.outerHTML.length + documentElement.scrollHeight
+ * — cheap to compute, catches insertions and layout reflows but NOT pixel-
+ * only changes (CSS animations, transitions, image decoding). Use only when
+ * the page is known to be free of those.
+ */
+async function waitForDomStable(page, maxMs, stableMs) {
+    if (maxMs <= 0) return;
+    const start = Date.now();
+    let lastSig = null;
+    let stableSince = null;
+    while (Date.now() - start < maxMs) {
+        const sig = await page.evaluate(() =>
+            document.body
+                ? document.body.outerHTML.length + ':' + document.documentElement.scrollHeight
+                : '0',
+        );
+        if (sig === lastSig) {
+            stableSince ??= Date.now();
+            if (Date.now() - stableSince >= stableMs) return;
+        } else {
+            lastSig = sig;
+            stableSince = null;
+        }
+        await page.waitForTimeout(100);
+    }
+}
 
 // Enable verbose debug logging via:  CASSETTE_DEBUG=1 npx playwright test ...
 const debug = !!process.env.CASSETTE_DEBUG;
@@ -284,7 +322,9 @@ test(cassetteName, async ({ page }) => {
 
             console.log(`  #${index + 1}  GET   ${url}`);
             await page.goto(url, { waitUntil: 'networkidle' });
-            if (waitAfterGoto > 0) {
+            if (domStableMs > 0) {
+                await waitForDomStable(page, waitAfterGoto, domStableMs);
+            } else if (waitAfterGoto > 0) {
                 await page.waitForTimeout(waitAfterGoto);
             }
 
