@@ -8,6 +8,10 @@ const projectRoot = process.env.CASSETTE_ROOT || path.join(__dirname, '../../../
 const configPath = path.join(projectRoot, '.cassette/config.json');
 const cassetteConfig = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
 
+// Per-project + per-run output dir so parallel replays of different projects don't clobber each other.
+const outputSlug = (path.basename(projectRoot) + '-' + (process.env.CASSETTE_NAME || '_unknown'))
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+
 module.exports = defineConfig({
     // Test files live alongside the PHP source files.
     testDir: __dirname,
@@ -33,7 +37,7 @@ module.exports = defineConfig({
 
     // Artifacts (traces etc.) land in /tmp — diffs are copied to .cassette/runs/{name}/
     // directly by the afterEach hook in cassette.spec.js.
-    outputDir: '/tmp/cassette-playwright-results',
+    outputDir: '/tmp/cassette-playwright-results-' + outputSlug,
 
     use: {
         // Self-signed certs on dev are fine — the recording already validated the content.

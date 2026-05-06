@@ -130,6 +130,7 @@ $cassetteBuiltinFunctions = [
     'mt_rand',
     'random_bytes',
     'random_int',
+    'uniqid',
 
     // ── Environment / process identity ───────────────────────────────────
     // getenv() with no args returns the full env array (one big entry); with

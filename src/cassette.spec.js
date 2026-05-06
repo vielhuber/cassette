@@ -597,14 +597,26 @@ function parseResponseHeaders(headersList) {
 }
 
 /**
+ * URL paths Chromium treats as resource fetches (favicon, images, fonts, css,
+ * js, …). Even when the server returns HTML for these paths (e.g. a 404 page
+ * from /favicon.ico), `page.goto` aborts with ERR_ABORTED because the network
+ * layer pre-classifies them as sub-resources. Always replay these via
+ * apiRequest instead of navigation.
+ */
+const ASSET_EXTENSION_REGEX =
+    /\.(ico|png|jpe?g|gif|webp|svg|bmp|css|js|mjs|map|woff2?|ttf|eot|otf|mp3|mp4|webm|ogg|wasm|pdf|zip|xml|txt|csv)(\?|$)/i;
+
+/**
  * Returns true when the recorded response is a full HTML page that should be
  * screenshot-tested. Returns false for JSON, plain-text, or other non-HTML
  * responses (AJAX endpoints that advance the pointer but need no visual diff).
  *
- * @param {{response: {headers?: string[]}}} entry
+ * @param {{request?: {uri?: string}, response: {headers?: string[]}}} entry
  * @returns {boolean}
  */
 function isHtmlResponse(entry) {
+    const uri = entry.request?.uri ?? '';
+    if (ASSET_EXTENSION_REGEX.test(uri)) return false;
     const ctHeader = (entry.response?.headers ?? []).find((h) => /^content-type:/i.test(h));
     if (!ctHeader) return true; // assume HTML when Content-Type is absent
     return /text\/html/i.test(ctHeader);
