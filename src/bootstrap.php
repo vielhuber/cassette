@@ -163,6 +163,11 @@ declare(strict_types=1);
         $cassetteExt::start();
     }
 
+    // Non-strict shim used by hook closures to invoke the captured original
+    // callable. Must be loaded before CassetteHooks.php so the helper is
+    // available the first time any hook fires.
+    require_once __DIR__ . '/CassetteInvoker.php';
+
     // Install all uopz hooks (hooks read Cassette::getMode() at call time).
     require_once __DIR__ . '/CassetteHooks.php';
 

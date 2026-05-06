@@ -805,22 +805,43 @@ final class Cassette
     /**
      * Normalize arguments to JSON-safe values.
      *
-     * Closures and resources are replaced with placeholder strings.
+     * Closures and resources are replaced with placeholder strings. Strings
+     * that are not valid UTF-8 (binary blobs like raw PDF/PNG/zip bytes passed
+     * to file_put_contents, or anything inside __::curl payload arrays) are
+     * wrapped with the BASE64_RETURN_PREFIX so the whole bucket round-trips
+     * through json_encode cleanly — without this, a single binary arg makes
+     * json_encode fail with "Malformed UTF-8 characters" and Cassette::save()
+     * silently drops the entire bucket, causing every replay-time call in
+     * that request to fall through and break.
      */
     private static function serializeArgs(array $args): array
     {
-        return array_map(static function (mixed $arg): mixed {
-            if ($arg instanceof \Closure) {
-                return '__closure__';
-            }
-            if (is_resource($arg)) {
-                return '__resource__';
-            }
-            if (is_object($arg)) {
-                return (array) $arg;
-            }
-            return $arg;
-        }, $args);
+        return array_map([self::class, 'serializeArgValue'], $args);
+    }
+
+    /**
+     * Recursive worker for serializeArgs — applied per element so binary
+     * strings nested inside arrays (e.g. __::curl(['data' => $bin])) get
+     * the same B64 wrapping as top-level binary args.
+     */
+    private static function serializeArgValue(mixed $value): mixed
+    {
+        if ($value instanceof \Closure) {
+            return '__closure__';
+        }
+        if (is_resource($value)) {
+            return '__resource__';
+        }
+        if (is_object($value)) {
+            return array_map([self::class, 'serializeArgValue'], (array) $value);
+        }
+        if (is_array($value)) {
+            return array_map([self::class, 'serializeArgValue'], $value);
+        }
+        if (is_string($value) && $value !== '' && !mb_check_encoding($value, 'UTF-8')) {
+            return self::BASE64_RETURN_PREFIX . base64_encode($value);
+        }
+        return $value;
     }
 
     /**

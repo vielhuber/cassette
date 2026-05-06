@@ -302,7 +302,11 @@ function installFunctionHook(string $fn): void
                     $original = Closure::fromCallable($fn);
                 }
 
-                $result     = $original(...$args);
+                // Invoke via non-strict shim so callers like uniqid(mt_rand(), true)
+                // continue to coerce int → string the same way they would without
+                // the hook. Direct $original(...$args) here would inherit this
+                // file's strict_types and throw a TypeError.
+                $result     = cassetteInvokeOriginal($original, $args);
                 // unserialize(serialize(...)) gives us a deep copy that goes
                 // through the same data path as replay (where mock() returns
                 // unserialize($entry['return'])). Keeps the value seen by the
@@ -354,20 +358,22 @@ function installFilesystemFunctionHook(string $fn, bool $fallThrough = true, int
             }
 
             if (str_contains($path, '/.cassette/')) {
-                return $original(...$args);
+                return cassetteInvokeOriginal($original, $args);
             }
 
             $mode = Cassette::getMode();
 
             if ($mode === Cassette::MODE_MOCK) {
                 if ($fallThrough && !Cassette::hasArgKeyMatch($fn, $args)) {
-                    return $original(...$args);
+                    return cassetteInvokeOriginal($original, $args);
                 }
                 return Cassette::mock($fn, $args);
             }
 
             if ($mode === Cassette::MODE_RECORD) {
-                $result     = $original(...$args);
+                // See installFunctionHook for why the original is invoked via
+                // the non-strict shim instead of `$original(...$args)` here.
+                $result     = cassetteInvokeOriginal($original, $args);
                 $serialized = serialize($result);
                 $result     = unserialize($serialized);
                 Cassette::recordSerialized($fn, $args, $serialized);
@@ -412,7 +418,9 @@ function installStaticMethodHook(string $class, string $method): void
             }
 
             if ($mode === Cassette::MODE_RECORD) {
-                $result     = $original(...$args);
+                // See installFunctionHook for why the original is invoked via
+                // the non-strict shim instead of `$original(...$args)` here.
+                $result     = cassetteInvokeOriginal($original, $args);
                 $serialized = serialize($result);
                 $result     = unserialize($serialized);
                 Cassette::recordSerialized($key, $args, $serialized);
@@ -459,8 +467,9 @@ function installInstanceMethodHook(string $class, string $method): void
             if ($mode === Cassette::MODE_RECORD) {
                 // ReflectionMethod::invoke() bypasses uopz so we call the
                 // original method on the current $this without any
-                // unhook/rehook trickery.
-                $result     = $reflection->invoke($this, ...$args);
+                // unhook/rehook trickery. Routed through the non-strict shim
+                // so coercive type rules apply (see installFunctionHook).
+                $result     = cassetteInvokeReflectionMethod($reflection, $this, $args);
                 $serialized = serialize($result);
                 $result     = unserialize($serialized);
                 Cassette::recordSerialized($key, $args, $serialized);
