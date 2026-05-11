@@ -32,6 +32,8 @@ final class CassetteHttpRecorder
      */
     public static function start(string $cassetteName, string $mode, string $basePath): void
     {
+        self::installHeadersSentShim();
+
         if ($mode !== Cassette::MODE_RECORD) {
             return;
         }
@@ -111,18 +113,22 @@ final class CassetteHttpRecorder
             PHP_OUTPUT_HANDLER_STDFLAGS
         );
 
-        // ob_start() prevents PHP from physically sending bytes to the client,
-        // which keeps headers_sent() returning false for the entire request.
-        // In a real (non-buffered) replay request, headers_sent() becomes true
-        // immediately after the first echo — app code that uses headers_sent()
-        // to choose between "direct echo" and "store in cookie for next request"
-        // (e.g. flash-message helpers) therefore behaves differently during
-        // recording than during replay. Fix: override headers_sent() via uopz
-        // to return true once any content has been written into the output buffer,
-        // mirroring exactly what happens in a non-buffered request.
+        // ob_start() prevents PHP from physically sending bytes to the client;
+        // installHeadersSentShim() keeps app code that branches on headers_sent()
+        // aligned between record and mock replay.
+    }
+
+    private static function installHeadersSentShim(): void
+    {
         if (function_exists('uopz_set_return')) {
-            uopz_set_return('headers_sent', static function (): bool {
-                return ob_get_length() > 0;
+            $headersSent = Closure::fromCallable('headers_sent');
+
+            uopz_set_return('headers_sent', static function (?string &$filename = null, ?int &$line = null) use ($headersSent): bool {
+                if ((ob_get_length() ?: 0) > 0) {
+                    return true;
+                }
+
+                return $headersSent($filename, $line);
             }, true);
         }
     }

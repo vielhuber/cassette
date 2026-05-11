@@ -72,6 +72,25 @@ async function waitForDomStable(page, maxMs, stableMs) {
     }
 }
 
+async function warmLazyLoadedContent(page) {
+    await page.evaluate(async () => {
+        const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const viewportHeight = window.innerHeight || 800;
+        const maxScroll = Math.max(
+            document.body?.scrollHeight ?? 0,
+            document.documentElement?.scrollHeight ?? 0,
+        );
+
+        for (let offset = 0; offset <= maxScroll; offset += viewportHeight) {
+            window.scrollTo(0, offset);
+            await delay(100);
+        }
+
+        window.scrollTo(0, 0);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+}
+
 // Enable verbose debug logging via:  CASSETTE_DEBUG=1 npx playwright test ...
 const debug = !!process.env.CASSETTE_DEBUG;
 const dbg = (...args) => {
@@ -415,6 +434,8 @@ test(cassetteName, async ({ page }) => {
                     }
                 });
             }
+
+            await warmLazyLoadedContent(page);
 
             // Wait for everything that commonly keeps the page repainting and
             // flakes toHaveScreenshot's stability detection: web fonts arriving

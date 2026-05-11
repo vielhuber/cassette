@@ -121,56 +121,12 @@ switch ($command) {
         break;
 
     case 'record':
-        // Delete existing cassette files so a clean recording starts.
-        // data.counter must also be removed — otherwise the previous run's
-        // counter value carries over and the fresh recording starts at a
-        // non-zero bucket index, leaving gaps at 0..N-1.
-        $toDelete = [
-            $cassettesDir . '/' . $name . '/data.json',
-            $cassettesDir . '/' . $name . '/data.pointer',
-            $cassettesDir . '/' . $name . '/data.counter',
-            $cassettesDir . '/' . $name . '/http.json',
-            $cassettesDir . '/' . $name . '/.started',
-        ];
+        $runDir = $cassettesDir . '/' . $name;
 
-        foreach ($toDelete as $path) {
-            if (file_exists($path)) {
-                unlink($path);
-            }
-        }
-
-        // buckets/ holds the per-bucket files that replaced the monolithic
-        // data.json — nuke it so the fresh recording does not mix old buckets
-        // into the new flow.
-        $bucketsDir = $cassettesDir . '/' . $name . '/buckets';
-        if (is_dir($bucketsDir)) {
-            foreach (glob($bucketsDir . '/*.json.gz') ?: [] as $old) {
-                unlink($old);
-            }
-        }
-
-        // screenshots/ holds Playwright baselines tied to the previous flow.
-        // A fresh recording almost always renders different content (different
-        // pages visited, different cookie state, different URLs) so the old
-        // baselines would mismatch the new replay and fail with confusing
-        // "screenshot did not stabilize" timeouts (toHaveScreenshot retries
-        // until it gives up). Wipe them so the next replay creates new ones.
-        $screenshotsDir = $cassettesDir . '/' . $name . '/screenshots';
-        if (is_dir($screenshotsDir)) {
-            foreach (glob($screenshotsDir . '/*.png') ?: [] as $old) {
-                unlink($old);
-            }
-        }
-
-        // http/ holds .diff and .actual files from previous failed replays —
-        // stale once the recording changes. Wipe them too.
-        $httpDir = $cassettesDir . '/' . $name . '/http';
-        if (is_dir($httpDir)) {
-            foreach (glob($httpDir . '/*') ?: [] as $old) {
-                if (is_file($old)) {
-                    unlink($old);
-                }
-            }
+        if (runExists($runDir)) {
+            fwrite(STDERR, "\033[31m⛔ Run already exists:\033[0m $name\n");
+            fwrite(STDERR, "Delete it first if you really want to record it again: vendor/bin/cassette delete $name --root=" . escapeshellarg($projectRoot) . "\n");
+            exit(1);
         }
 
         $config['mode'] = 'record';
@@ -330,6 +286,10 @@ switch ($command) {
         // to 0 in test.beforeAll() so the screenshot run starts from request bucket 0.
 
         $snapshotDir = $cassettesDir . '/' . $name . '/screenshots';
+
+        foreach (glob($snapshotDir . '/*-{actual,diff}.png', GLOB_BRACE) ?: [] as $staleScreenshotArtifact) {
+            unlink($staleScreenshotArtifact);
+        }
 
         // --refresh: wipe existing baselines so they are recreated from scratch.
         if ($refresh && is_dir($snapshotDir)) {
@@ -569,6 +529,20 @@ function passthruLogged(string $cmd, int &$exitCode, $logFh): void
     }
 
     $exitCode = proc_close($proc);
+}
+
+/**
+ * Return whether a cassette run already has persisted data.
+ */
+function runExists(string $runDir): bool
+{
+    if (!is_dir($runDir)) {
+        return false;
+    }
+
+    $entries = array_diff(scandir($runDir) ?: [], ['.', '..']);
+
+    return !empty($entries);
 }
 
 /**
