@@ -855,16 +855,22 @@ final class Cassette
     /**
      * Reconstruct the original return value. Recognises the base64 wrapper
      * (BASE64_RETURN_PREFIX + base64) for current recordings; falls back to
-     * raw unserialize() so older cassettes still replay.
+     * constrained unserialize() so older cassettes still replay without
+     * instantiating arbitrary classes.
      */
     private static function deserializeReturn(mixed $raw): mixed
     {
         $raw = (string) $raw;
         if (str_starts_with($raw, self::BASE64_RETURN_PREFIX)) {
             $decoded = base64_decode(substr($raw, strlen(self::BASE64_RETURN_PREFIX)), true);
-            return $decoded === false ? null : unserialize($decoded);
+            return $decoded === false ? null : self::unserializeReturn($decoded);
         }
-        return unserialize($raw);
+        return self::unserializeReturn($raw);
+    }
+
+    private static function unserializeReturn(string $raw): mixed
+    {
+        return unserialize($raw, ['allowed_classes' => ['stdClass']]);
     }
 
 }
